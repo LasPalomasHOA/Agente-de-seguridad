@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   StyleSheet,
@@ -6,26 +6,53 @@ import {
   TextInput,
   Pressable,
   Image,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ThemedText } from '@/components/themed-text';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
-import { mockCategorias, mockInfracciones } from '../data/mockData';
+import { SupabaseService } from '../services/supabaseService';
+import { CatalogoInfraccionRow, ReglamentoRow } from '../types/database';
 
 export default function ReglamentoScreen() {
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('todos');
+  const [infracciones, setInfracciones] = useState<CatalogoInfraccionRow[]>([]);
+  const [reglamentos, setReglamentos] = useState<ReglamentoRow[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const filteredInfracciones = mockInfracciones.filter((inf) => {
+  useEffect(() => {
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const [infs, regs] = await Promise.all([
+          SupabaseService.getCatalogoInfracciones(),
+          SupabaseService.getReglamentos(),
+        ]);
+        setInfracciones(infs);
+        setReglamentos(regs);
+      } catch (e) {
+        console.warn('Error fetching reglamento data:', e);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []);
+
+  const categorias = Array.from(new Set(infracciones.map((i) => i.categoria))).filter(Boolean);
+
+  const filteredInfracciones = infracciones.filter((inf) => {
     const matchesSearch =
-      inf.codigo.toLowerCase().includes(search.toLowerCase()) ||
-      inf.nombre.toLowerCase().includes(search.toLowerCase()) ||
-      inf.descripcion.toLowerCase().includes(search.toLowerCase()) ||
-      inf.reglaRelacionada.toLowerCase().includes(search.toLowerCase());
+      (inf.codigo || '').toLowerCase().includes(search.toLowerCase()) ||
+      (inf.nombre || '').toLowerCase().includes(search.toLowerCase()) ||
+      (inf.descripcion || '').toLowerCase().includes(search.toLowerCase()) ||
+      (inf.categoria || '').toLowerCase().includes(search.toLowerCase());
 
     if (activeCategory === 'todos') return matchesSearch;
-    return matchesSearch && inf.categoriaId === activeCategory;
+    return matchesSearch && inf.categoria === activeCategory;
   });
 
   return (
@@ -36,7 +63,9 @@ export default function ReglamentoScreen() {
         subtitle="Catálogo oficial de normativas, códigos y sanciones."
         rightElement={
           <View style={styles.miniResortTagBadge}>
-            <ThemedText style={styles.miniResortTagText}>14 Normas</ThemedText>
+            <ThemedText style={styles.miniResortTagText}>
+              {infracciones.length} Normas
+            </ThemedText>
           </View>
         }
       />
@@ -77,51 +106,58 @@ export default function ReglamentoScreen() {
           </ThemedText>
         </Pressable>
 
-        {mockCategorias.map((cat) => (
+        {categorias.map((cat) => (
           <Pressable
-            key={cat.id}
-            onPress={() => setActiveCategory(cat.id)}
+            key={cat}
+            onPress={() => setActiveCategory(cat)}
             style={[
               styles.categoryPill,
-              activeCategory === cat.id && styles.categoryPillActive,
+              activeCategory === cat && styles.categoryPillActive,
             ]}
           >
             <ThemedText
               style={[
                 styles.categoryPillText,
-                activeCategory === cat.id && styles.categoryPillTextActive,
+                activeCategory === cat && styles.categoryPillTextActive,
               ]}
             >
-              {cat.nombre}
+              {cat}
             </ThemedText>
           </Pressable>
         ))}
       </View>
 
-      {/* Infractions List Cards */}
-      <View style={styles.infraccionesList}>
-        {filteredInfracciones.map((inf) => {
-          const gravedadConfig = {
-            leve: { color: '#0D6E5F', bg: '#E6F4F1', label: 'Leve' },
-            moderada: { color: '#2563EB', bg: '#EFF6FF', label: 'Moderada' },
-            grave: { color: '#D97706', bg: '#FEF3C7', label: 'Grave' },
-            critica: { color: '#DC2626', bg: '#FEE2E2', label: 'Crítica' },
-          }[inf.gravedad] || { color: '#0D6E5F', bg: '#E6F4F1', label: inf.gravedad };
-
-          return (
-            <View key={inf.codigo} style={styles.infractionCard}>
+      {/* Loading state or Infractions List Cards */}
+      {loading ? (
+        <View style={{ padding: 40, alignItems: 'center' }}>
+          <ActivityIndicator size="large" color="#0D6E5F" />
+          <ThemedText style={{ marginTop: 12, color: '#64748B' }}>
+            Cargando catálogo oficial...
+          </ThemedText>
+        </View>
+      ) : filteredInfracciones.length === 0 ? (
+        <View style={{ padding: 40, alignItems: 'center' }}>
+          <Ionicons name="document-text-outline" size={48} color="#94a3b8" />
+          <ThemedText style={{ marginTop: 12, color: '#64748B', textAlign: 'center' }}>
+            No se encontraron infracciones en el catálogo oficial de la base de datos.
+          </ThemedText>
+        </View>
+      ) : (
+        <View style={styles.infraccionesList}>
+          {filteredInfracciones.map((inf) => (
+            <View key={inf.id_infraccion || inf.codigo} style={styles.infractionCard}>
               <View style={styles.infractionCardTop}>
                 <View style={styles.codeRow}>
                   <View style={styles.codePill}>
                     <ThemedText style={styles.codePillText}>{inf.codigo}</ThemedText>
                   </View>
-                  <View style={[styles.gravedadPill, { backgroundColor: gravedadConfig.bg }]}>
-                    <ThemedText style={[styles.gravedadPillText, { color: gravedadConfig.color }]}>
-                      {gravedadConfig.label}
+                  <View style={[styles.gravedadPill, { backgroundColor: '#EFF6FF' }]}>
+                    <ThemedText style={[styles.gravedadPillText, { color: '#2563EB' }]}>
+                      {inf.categoria}
                     </ThemedText>
                   </View>
                 </View>
-                <ThemedText style={styles.reglaText}>{inf.reglaRelacionada}</ThemedText>
+                <ThemedText style={styles.reglaText}>Reglamento HOA</ThemedText>
               </View>
 
               <ThemedText style={styles.infractionTitle}>{inf.nombre}</ThemedText>
@@ -130,13 +166,13 @@ export default function ReglamentoScreen() {
               <View style={styles.sancionBox}>
                 <Ionicons name="alert-circle-outline" size={16} color="#0D6E5F" style={{ marginRight: 6 }} />
                 <ThemedText style={styles.sancionText}>
-                  Medida: Suspensión de acceso &bull; Multa: ${inf.multaBase.toLocaleString()} MXN
+                  Normativa Oficial &bull; Aplicación por Oficial en Turno
                 </ThemedText>
               </View>
             </View>
-          );
-        })}
-      </View>
+          ))}
+        </View>
+      )}
     </ScrollView>
   );
 }

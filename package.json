@@ -30,14 +30,17 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.10",
+    "eslint": "^9.0.0",
+    "eslint-config-expo": "~10.0.0",
     "typescript": "~5.9.2"
   },
   "scripts": {
-    "start": "expo start",
+    "start": "node scripts/start-all.js",
+    "web": "node scripts/start-all.js --web",
+    "android": "node scripts/start-all.js --android",
+    "ios": "node scripts/start-all.js --ios",
+    "server": "node -r dotenv/config ../ControldeAccesosySanciones/Server/index.cjs dotenv_config_path=./.env",
     "reset-project": "node ./scripts/reset-project.js",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web",
     "lint": "expo lint"
   },
   "private": true

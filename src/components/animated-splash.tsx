@@ -49,12 +49,12 @@ export function AnimatedSplashScreen({
           toValue: 1,
           friction: 6,
           tension: 45,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }),
         Animated.timing(logoOpacity, {
           toValue: 1,
           duration: 500,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }),
       ]).start();
 
@@ -64,13 +64,13 @@ export function AnimatedSplashScreen({
           toValue: 1,
           duration: 600,
           delay: 250,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }),
         Animated.timing(textSlide, {
           toValue: 0,
           duration: 600,
           delay: 250,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }),
       ]).start();
 
@@ -100,12 +100,12 @@ export function AnimatedSplashScreen({
           Animated.timing(containerOpacity, {
             toValue: 0,
             duration: 350,
-            useNativeDriver: true,
+            useNativeDriver: Platform.OS !== 'web',
           }),
           Animated.timing(containerScale, {
             toValue: 1.05,
             duration: 350,
-            useNativeDriver: true,
+            useNativeDriver: Platform.OS !== 'web',
           }),
         ]).start(() => {
           if (onFinish) {
@@ -134,9 +134,9 @@ export function AnimatedSplashScreen({
         {
           opacity: containerOpacity,
           transform: [{ scale: containerScale }],
+          pointerEvents: 'none',
         },
       ]}
-      pointerEvents="none"
     >
       <LinearGradient
         colors={['#021B18', '#042F2E', '#0D6E5F', '#042F2E']}

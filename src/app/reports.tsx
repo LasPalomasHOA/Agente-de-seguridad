@@ -16,7 +16,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
 import { ReporteInfraccion } from '../types/reporte';
-import { mockVehiculos, mockEmpresas, mockInfracciones } from '../data/mockData';
 
 const { width } = Dimensions.get('window');
 
@@ -33,16 +32,16 @@ export default function ReportsScreen() {
   const misReportes = reportes.filter((r) => r.agenteId === agenteActual.id);
 
   const filtered = misReportes.filter((rep) => {
-    const veh = mockVehiculos.find((v) => v.id === rep.vehiculoId);
-    const emp = mockEmpresas.find((e) => e.id === veh?.empresaId);
-    const inf = mockInfracciones.find((i) => i.codigo === rep.infraccionCodigo);
-
     const matchesSearch =
       rep.folio.toLowerCase().includes(searchFolio.toLowerCase()) ||
-      (veh?.placa || '').toLowerCase().includes(searchFolio.toLowerCase()) ||
-      (veh?.marca || '').toLowerCase().includes(searchFolio.toLowerCase()) ||
-      (emp?.nombre || '').toLowerCase().includes(searchFolio.toLowerCase()) ||
-      (inf?.nombre || '').toLowerCase().includes(searchFolio.toLowerCase());
+      rep.infraccionCodigo.toLowerCase().includes(searchFolio.toLowerCase()) ||
+      rep.lugar.toLowerCase().includes(searchFolio.toLowerCase()) ||
+      rep.descripcion.toLowerCase().includes(searchFolio.toLowerCase()) ||
+      rep.corbatinNumero.toLowerCase().includes(searchFolio.toLowerCase());
+
+    if (dateFilter.trim()) {
+      if (!rep.fecha.includes(dateFilter.trim())) return false;
+    }
 
     if (selectedStatus === 'pendiente') {
       return matchesSearch && (rep.estado === 'pendiente' || rep.estado === 'informacion_solicitada');
@@ -146,7 +145,6 @@ export default function ReportsScreen() {
       {/* 2x2 Grid of Report Cards matching Image 5 Right */}
       <View style={styles.reportsGrid2x2}>
         {filtered.map((rep) => {
-          const vehiculo = mockVehiculos.find((v) => v.id === rep.vehiculoId);
           const isAprobado = rep.estado === 'aprobado';
           const isRechazado = rep.estado === 'rechazado';
           const isBorrador = rep.estado === 'borrador';
@@ -199,7 +197,7 @@ export default function ReportsScreen() {
 
               {/* Vehicle Description */}
               <ThemedText style={styles.cardVehicleName}>
-                {vehiculo ? `${vehiculo.marca} ${vehiculo.modelo}` : 'Inspección de Carga'}
+                {rep.corbatinNumero ? `Corbatín ${rep.corbatinNumero}` : 'Inspección en Predio'}
               </ThemedText>
 
               {/* Card Footer: Date & Arrow */}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, StyleSheet, ScrollView, Pressable, Modal, Image, useWindowDimensions } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -6,7 +6,8 @@ import { useMobile } from '../context/MobileContext';
 import { useTheme } from '@/hooks/use-theme';
 import { Spacing } from '@/constants/theme';
 import { Ionicons } from '@expo/vector-icons';
-import { mockInfracciones } from '../data/mockData';
+import { SupabaseService } from '../services/supabaseService';
+import { CatalogoInfraccionRow } from '../types/database';
 
 export default function ProfileScreen() {
   const { agenteActual, reportes, logout, themeMode, toggleTheme } = useMobile();
@@ -16,11 +17,16 @@ export default function ProfileScreen() {
   // Modal references
   const [helpVisible, setHelpVisible] = useState(false);
   const [rulesVisible, setRulesVisible] = useState(false);
+  const [infracciones, setInfracciones] = useState<CatalogoInfraccionRow[]>([]);
+
+  useEffect(() => {
+    SupabaseService.getCatalogoInfracciones().then(setInfracciones);
+  }, []);
 
   // Stats calculation
-  const misReportes = reportes.filter((r) => r.agenteId === agenteActual.id);
-  const pendientes = misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length;
-  const aprobados = misReportes.filter((r) => r.estado === 'aprobado').length;
+  const misReportes = (reportes || []).filter((r: any) => r.agenteId === agenteActual?.id);
+  const pendientes = misReportes.filter((r: any) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length;
+  const aprobados = misReportes.filter((r: any) => r.estado === 'aprobado').length;
 
   const isTablet = width >= 600;
 
@@ -36,7 +42,7 @@ export default function ProfileScreen() {
       ]}
     >
       <Image
-        source={require('@/assets/images/logo.png')}
+        source={require('../../assets/images/logo.png')}
         style={{ width: 190, height: 48, marginBottom: 14 }}
         resizeMode="contain"
       />
@@ -48,9 +54,9 @@ export default function ProfileScreen() {
         ]}
       >
         <ThemedText style={[styles.avatarText, { color: theme.primary }]}>
-          {agenteActual.nombre
+          {(agenteActual?.nombre || 'Oficial')
             .split(' ')
-            .map((n) => n[0])
+            .map((n: string) => n[0] || '')
             .join('')}
         </ThemedText>
         <View style={[styles.statusIndicator, { backgroundColor: theme.success }]} />
@@ -454,23 +460,18 @@ export default function ProfileScreen() {
             </View>
 
             <ScrollView contentContainerStyle={styles.rulesList} showsVerticalScrollIndicator={false}>
-              {mockInfracciones.map((inf) => {
-                const gravityColor =
-                  inf.gravedad === 'leve'
-                    ? theme.success
-                    : inf.gravedad === 'moderada'
-                    ? theme.warning
-                    : theme.danger;
+              {infracciones.map((inf: CatalogoInfraccionRow) => {
+                const gravityColor = theme.primary;
 
                 return (
-                  <View key={inf.codigo} style={[styles.ruleItemCard, { borderBottomColor: theme.border }]}>
+                  <View key={inf.id_infraccion || inf.codigo} style={[styles.ruleItemCard, { borderBottomColor: theme.border }]}>
                     <View style={styles.ruleItemHead}>
                       <ThemedText type="smallBold" style={{ fontSize: 13, color: theme.text }}>
                         {inf.codigo} &bull; {inf.nombre}
                       </ThemedText>
                       <View style={[styles.gravityBadge, { borderColor: gravityColor }]}>
                         <ThemedText style={{ color: gravityColor, fontSize: 8, fontWeight: 'bold' }}>
-                          {inf.gravedad.toUpperCase()}
+                          {inf.categoria.toUpperCase()}
                         </ThemedText>
                       </View>
                     </View>
@@ -478,7 +479,7 @@ export default function ProfileScreen() {
                       {inf.descripcion}
                     </ThemedText>
                     <ThemedText style={{ fontSize: 10, color: theme.primary, fontWeight: 'bold', marginTop: 4 }}>
-                      Referencia: {inf.reglaRelacionada}
+                      Reglamento Oficial HOA
                     </ThemedText>
                   </View>
                 );

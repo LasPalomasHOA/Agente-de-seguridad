@@ -9,13 +9,14 @@ import {
   Dimensions,
   Modal,
   Animated,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMobile } from '../context/MobileContext';
 import { ThemedText } from '@/components/themed-text';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { mockVehiculos, mockCorbatines, mockEmpresas, mockInfracciones } from '../data/mockData';
+import { SupabaseService } from '../services/supabaseService';
 import { ReporteInfraccion } from '../types/reporte';
 import { Evidencia } from '../types/evidencia';
 
@@ -45,13 +46,13 @@ export default function HomeDashboard() {
       Animated.timing(fadeAnim, {
         toValue: 0.3,
         duration: 700,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }).start(() => {
         setBgIndex((prev) => (prev + 1) % RESORT_SLIDES.length);
         Animated.timing(fadeAnim, {
           toValue: 1,
           duration: 700,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }).start();
       });
     }, 5500);
@@ -68,23 +69,15 @@ export default function HomeDashboard() {
     if (!target.trim()) return;
 
     let targetNum = target.trim();
-    if (!targetNum.startsWith('C-')) {
+    if (!targetNum.startsWith('C-') && /^\d+$/.test(targetNum)) {
       const paddedNum = targetNum.padStart(3, '0');
       targetNum = `C-2026-${paddedNum}`;
     }
 
-    const matchedCorbatin = mockCorbatines.find((c) => c.numero.toUpperCase() === targetNum.toUpperCase());
-    if (matchedCorbatin) {
-      router.push({
-        pathname: '/scanner',
-        params: { corbatinNumero: matchedCorbatin.numero },
-      });
-    } else {
-      router.push({
-        pathname: '/scanner',
-        params: { corbatinNumero: targetNum },
-      });
-    }
+    router.push({
+      pathname: '/scanner',
+      params: { corbatinNumero: targetNum },
+    });
   };
 
   return (
@@ -267,8 +260,6 @@ export default function HomeDashboard() {
                 informacion_solicitada: { bg: '#EFF6FF', text: '#2563EB', label: 'En Revisión' },
               }[rep.estado] || { bg: '#F1F5F9', text: '#475569', label: rep.estado };
 
-              const infObj = mockInfracciones.find((i) => i.codigo === rep.infraccionCodigo);
-
               return (
                 <Pressable
                   key={rep.id}
@@ -287,7 +278,7 @@ export default function HomeDashboard() {
                         Folio: {rep.folio}
                       </ThemedText>
                       <ThemedText style={styles.reportCardDesc} numberOfLines={1}>
-                        {infObj?.nombre || rep.descripcion || 'Incidente en predio'}
+                        {rep.descripcion || rep.infraccionCodigo || 'Incidente en predio'}
                       </ThemedText>
                     </View>
                   </View>
@@ -331,7 +322,7 @@ export default function HomeDashboard() {
                   <View style={styles.modalFieldBox}>
                     <ThemedText style={styles.modalFieldLabel}>INFRACCIÓN REGISTRADA</ThemedText>
                     <ThemedText style={styles.modalFieldValueBold}>
-                      {mockInfracciones.find((i) => i.codigo === selectedReport.infraccionCodigo)?.nombre || selectedReport.infraccionCodigo}
+                      {selectedReport.infraccionCodigo}
                     </ThemedText>
                   </View>
 

@@ -11,6 +11,7 @@ import {
   Dimensions,
   SafeAreaView,
   Modal,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMobile } from '../context/MobileContext';
@@ -21,12 +22,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
 import { Select } from '../components/ui/select';
-import {
-  mockVehiculos,
-  mockCorbatines,
-  mockEmpresas,
-  mockInfracciones,
-} from '../data/mockData';
+import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
+import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
 
 type Mode = 'camera' | 'loading' | 'result' | 'wizard' | 'confirmation';
@@ -34,7 +31,7 @@ type WizardStep = 1 | 2 | 3;
 
 const { width } = Dimensions.get('window');
 
-const MOCK_PHOTOS = [
+const SAMPLE_EVIDENCIA_PHOTOS = [
   'https://images.unsplash.com/photo-1508962914676-134849a727f0?auto=format&fit=crop&q=80&w=600',
   'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
   'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&q=80&w=600',
@@ -60,8 +57,12 @@ export default function ScannerScreen() {
   // Navigation / Mode states
   const [mode, setMode] = useState<Mode>('camera');
   const [loadingText, setLoadingText] = useState('Consultando información del vehículo...');
-  const [selectedVehicle, setSelectedVehicle] = useState<typeof mockVehiculos[0] | null>(null);
-  const [selectedCorbatin, setSelectedCorbatin] = useState<typeof mockCorbatines[0] | null>(null);
+  const [selectedVehicle, setSelectedVehicle] = useState<VehiculoRow | null>(null);
+  const [selectedCorbatin, setSelectedCorbatin] = useState<CorbatinRow | null>(null);
+  const [selectedEmpresa, setSelectedEmpresa] = useState<EmpresaRow | null>(null);
+  const [selectedConductor, setSelectedConductor] = useState<TrabajadorRow | null>(null);
+  const [sancionesActivas, setSancionesActivas] = useState<SancionDbRow[]>([]);
+  const [catalogoInfracciones, setCatalogoInfracciones] = useState<CatalogoInfraccionRow[]>([]);
 
   // Manual input state on scanner screen
   const [manualCorbatinInput, setManualCorbatinInput] = useState('');
@@ -71,7 +72,7 @@ export default function ScannerScreen() {
   // Wizard state (3 steps)
   const [step, setStep] = useState<WizardStep>(1);
   const [selectedCategory, setSelectedCategory] = useState<string>('seguridad');
-  const [selectedInfraccion, setSelectedInfraccion] = useState<typeof mockInfracciones[0] | null>(mockInfracciones[0]);
+  const [selectedInfraccion, setSelectedInfraccion] = useState<CatalogoInfraccionRow | null>(null);
   const [lugar, setLugar] = useState('Estacionamiento Norte');
   const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
   const [hora, setHora] = useState(new Date().toTimeString().split(' ')[0].substring(0, 5));
@@ -86,24 +87,46 @@ export default function ScannerScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [generatedFolio, setGeneratedFolio] = useState('');
 
+  // Fetch catalog on mount
+  useEffect(() => {
+    SupabaseService.getCatalogoInfracciones().then((infs) => {
+      setCatalogoInfracciones(infs);
+      if (infs && infs.length > 0) {
+        setSelectedInfraccion(infs[0]);
+      }
+    });
+  }, []);
+
+  const executeLookup = async (code: string) => {
+    if (!code.trim()) return;
+    setLoadingText('Consultando base de datos HOA...');
+    setMode('loading');
+    try {
+      let res = await SupabaseService.buscarCorbatin(code);
+      if (!res) {
+        res = await SupabaseService.buscarVehiculoPorPlaca(code);
+      }
+      if (res && res.vehiculo) {
+        setSelectedVehicle(res.vehiculo);
+        setSelectedCorbatin(res.corbatin);
+        setSelectedEmpresa(res.empresa);
+        setSelectedConductor(res.conductorPrincipal || null);
+        setSancionesActivas(res.sancionesActivas || []);
+        setMode('result');
+      } else {
+        alert(`No se encontró vehículo ni corbatín con "${code}" en la base de datos.`);
+        setMode('camera');
+      }
+    } catch (e) {
+      alert('Error de conexión con la base de datos.');
+      setMode('camera');
+    }
+  };
+
   // Handle incoming deep links (e.g. from index.tsx)
   useEffect(() => {
     if (params.corbatinNumero) {
-      const num = params.corbatinNumero as string;
-      const targetCorbatin = mockCorbatines.find((c) => c.numero === num);
-      if (targetCorbatin) {
-        const targetVehiculo = mockVehiculos.find((v) => v.corbatinId === targetCorbatin.id);
-        if (targetVehiculo) {
-          setSelectedCorbatin(targetCorbatin);
-          setSelectedVehicle(targetVehiculo);
-          setLoadingText('Consultando información del vehículo...');
-          setMode('loading');
-          const t = setTimeout(() => {
-            setMode('result');
-          }, 1000);
-          return () => clearTimeout(t);
-        }
-      }
+      executeLookup(params.corbatinNumero as string);
     }
   }, [params.corbatinNumero]);
 
@@ -115,12 +138,12 @@ export default function ScannerScreen() {
           Animated.timing(laserAnim, {
             toValue: 180,
             duration: 1800,
-            useNativeDriver: true,
+            useNativeDriver: Platform.OS !== 'web',
           }),
           Animated.timing(laserAnim, {
             toValue: 0,
             duration: 1800,
-            useNativeDriver: true,
+            useNativeDriver: Platform.OS !== 'web',
           }),
         ])
       );
@@ -130,51 +153,38 @@ export default function ScannerScreen() {
   }, [mode, laserAnim]);
 
   // Actions
-  const handleTriggerScanSimulate = () => {
-    const randIdx = Math.floor(Math.random() * mockVehiculos.length);
-    const targetVehiculo = mockVehiculos[randIdx];
-    const targetCorbatin = mockCorbatines.find((c) => c.id === targetVehiculo.corbatinId) || mockCorbatines[0];
-
-    setSelectedVehicle(targetVehiculo);
-    setSelectedCorbatin(targetCorbatin);
-    setLoadingText('Consultando información del vehículo...');
-    setMode('loading');
-    setTimeout(() => {
-      setMode('result');
-    }, 1000);
+  const handleTriggerScanSimulate = async () => {
+    try {
+      const corbatines = await SupabaseService.getCorbatines();
+      if (corbatines && corbatines.length > 0) {
+        const rand = corbatines[Math.floor(Math.random() * corbatines.length)];
+        executeLookup(String(rand.numero || rand.qr_token));
+      } else {
+        executeLookup('1');
+      }
+    } catch {
+      executeLookup('1');
+    }
   };
 
   const handleManualSearch = (codeToSearch?: string) => {
     const target = codeToSearch || manualCorbatinInput;
     if (!target.trim()) return;
-
-    let targetNum = target.trim();
-    if (!targetNum.startsWith('C-')) {
-      const paddedNum = targetNum.padStart(3, '0');
-      targetNum = `C-2026-${paddedNum}`;
-    }
-
-    const matchedCorbatin = mockCorbatines.find((c) => c.numero.toUpperCase() === targetNum.toUpperCase());
-    if (matchedCorbatin) {
-      const matchedVehiculo = mockVehiculos.find((v) => v.corbatinId === matchedCorbatin.id);
-      if (matchedVehiculo) {
-        setSelectedCorbatin(matchedCorbatin);
-        setSelectedVehicle(matchedVehiculo);
-        setLoadingText('Consultando información del vehículo...');
-        setMode('loading');
-        setTimeout(() => {
-          setMode('result');
-        }, 1000);
-      }
-    } else {
-      alert(`Corbatín "${targetNum}" no encontrado en el sistema.`);
-    }
+    executeLookup(target.trim());
   };
 
   const startReportWizard = () => {
     setStep(1);
     setSelectedCategory('seguridad');
-    const defaultInf = mockInfracciones.find((i) => i.codigo === 'SEG-01') || mockInfracciones[0];
+    const defaultInf = catalogoInfracciones.find((i) => i.codigo === 'SEG-01') || catalogoInfracciones[0] || {
+      id_infraccion: 1,
+      id_reglamento: 1,
+      codigo: 'INF-01',
+      nombre: 'Infracción General',
+      descripcion: 'Reporte de falta',
+      categoria: 'Seguridad',
+      activo: true,
+    };
     setSelectedInfraccion(defaultInf);
     setDescripcion('');
     setEvidencias([]);
@@ -185,7 +195,7 @@ export default function ScannerScreen() {
 
   const handleAddPhotoSimulate = () => {
     if (evidencias.length >= 5) return;
-    const nextPhotoUrl = MOCK_PHOTOS[photoCount % MOCK_PHOTOS.length];
+    const nextPhotoUrl = SAMPLE_EVIDENCIA_PHOTOS[photoCount % SAMPLE_EVIDENCIA_PHOTOS.length];
     const newEvidencia: Evidencia = {
       id: `ev_${Date.now()}`,
       fotoUrl: nextPhotoUrl,
@@ -217,15 +227,15 @@ export default function ScannerScreen() {
     }
   };
 
-  const submitReport = () => {
+  const submitReport = async () => {
     if (!selectedVehicle || !selectedInfraccion) return;
     setSubmitting(true);
 
-    setTimeout(() => {
-      const folio = agregarReporte(
+    try {
+      const folio = await agregarReporte(
         {
-          vehiculoId: selectedVehicle.id,
-          corbatinNumero: selectedCorbatin?.numero || 'C-2026-000',
+          vehiculoId: String(selectedVehicle.id_vehiculo),
+          corbatinNumero: String(selectedCorbatin?.numero || '0'),
           infraccionCodigo: selectedInfraccion.codigo,
           lugar: lugar,
           descripcion: descripcion || 'Infracción reportada durante inspección de seguridad.',
@@ -236,12 +246,20 @@ export default function ScannerScreen() {
       );
 
       setGeneratedFolio(folio);
-      setSubmitting(false);
       setMode('confirmation');
-    }, 1200);
+    } catch {
+      alert('Error al registrar el reporte.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const isSuspended = selectedCorbatin?.estado === 'suspendido' || selectedCorbatin?.estado === 'restringido';
+  const isSuspended =
+    selectedCorbatin?.estatus === 'suspendido' ||
+    selectedCorbatin?.estatus === 'cancelado' ||
+    selectedVehicle?.estatus_acceso === 'denegado' ||
+    selectedVehicle?.estatus_acceso === 'suspendido' ||
+    sancionesActivas.length > 0;
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: '#F8FAFC' }]}>
@@ -362,12 +380,12 @@ export default function ScannerScreen() {
               <View style={styles.suspendedVehicleCard}>
                 <View style={styles.suspendedPhotoCol}>
                   <Image
-                    source={{ uri: selectedVehicle.fotoUrl || MOCK_PHOTOS[1] }}
+                    source={{ uri: selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[1] }}
                     style={styles.suspendedPhotoImg}
                     resizeMode="cover"
                   />
                   <View style={styles.plateTagOverlay}>
-                    <ThemedText style={styles.plateTagOverlayText}>{selectedVehicle.placa}</ThemedText>
+                    <ThemedText style={styles.plateTagOverlayText}>{selectedVehicle.placas}</ThemedText>
                   </View>
                 </View>
 
@@ -383,17 +401,19 @@ export default function ScannerScreen() {
                   </View>
 
                   <ThemedText style={styles.suspendedCompanyText}>
-                    🏢 {mockEmpresas.find((e) => e.id === selectedVehicle.empresaId)?.nombre || 'Construcciones del Puerto'}
+                    🏢 {selectedEmpresa?.razon_social || 'Construcciones del Puerto'}
                   </ThemedText>
 
                   <View style={styles.suspendedMiniGrid}>
                     <View style={{ flex: 1 }}>
                       <ThemedText style={styles.dataLabel}>Conductor Asignado</ThemedText>
-                      <ThemedText style={styles.dataValueSmall}>👤 {selectedVehicle.conductor} (No Verificado)</ThemedText>
+                      <ThemedText style={styles.dataValueSmall}>
+                        👤 {selectedConductor ? `${selectedConductor.nombre} ${selectedConductor.apellidos}` : 'No Registrado'}
+                      </ThemedText>
                     </View>
                     <View style={{ flex: 1 }}>
                       <ThemedText style={styles.dataLabel}>Tipo de Pase</ThemedText>
-                      <ThemedText style={styles.dataValueSmall}>📄 Contratista Temporal</ThemedText>
+                      <ThemedText style={styles.dataValueSmall}>📄 Contratista Acreditado</ThemedText>
                     </View>
                   </View>
                 </View>
@@ -413,7 +433,7 @@ export default function ScannerScreen() {
                     <ThemedText style={styles.dataLabel}>Motivo de Infracción</ThemedText>
                     <View style={styles.motifBox}>
                       <ThemedText style={styles.motifText}>
-                        {selectedCorbatin.motivoSuspension || 'Exceso de velocidad en zona peatonal y maniobra imprudente.'}
+                        {sancionesActivas[0]?.motivo || selectedCorbatin.motivo_cancelacion || 'Exceso de velocidad en zona peatonal y maniobra imprudente.'}
                       </ThemedText>
                     </View>
                   </View>
@@ -421,7 +441,9 @@ export default function ScannerScreen() {
                     <ThemedText style={styles.dataLabel}>Reincidencia</ThemedText>
                     <View style={styles.reincidenciaBadge}>
                       <Ionicons name="warning" size={14} color="#DC2626" style={{ marginRight: 4 }} />
-                      <ThemedText style={styles.reincidenciaText}>Nivel 2</ThemedText>
+                      <ThemedText style={styles.reincidenciaText}>
+                        {sancionesActivas[0]?.numero_reincidencia ? `Nivel ${sancionesActivas[0].numero_reincidencia}` : 'Nivel 1'}
+                      </ThemedText>
                     </View>
                   </View>
                 </View>
@@ -430,11 +452,11 @@ export default function ScannerScreen() {
                   <View>
                     <ThemedText style={styles.dataLabel}>Vencimiento de Sanción</ThemedText>
                     <ThemedText style={styles.suspensionVencimientoText}>
-                      {new Date(selectedCorbatin.fechaFinSuspension || '2026-10-15').toLocaleDateString()} 18:00
+                      {sancionesActivas[0]?.fecha_fin ? new Date(sancionesActivas[0].fecha_fin).toLocaleDateString() : 'Activa'}
                     </ThemedText>
                   </View>
                   <View style={styles.hoursRemainingBadge}>
-                    <ThemedText style={styles.hoursRemainingText}>En 48 horas</ThemedText>
+                    <ThemedText style={styles.hoursRemainingText}>En revisión</ThemedText>
                   </View>
                 </View>
               </View>
@@ -497,7 +519,7 @@ export default function ScannerScreen() {
                         <ThemedText style={styles.dataLabel}>Empresa Contratista</ThemedText>
                         <View style={styles.dataValueBox}>
                           <ThemedText style={styles.dataValue}>
-                            {mockEmpresas.find((e) => e.id === selectedVehicle.empresaId)?.nombre || 'Servicios del Desierto'}
+                            {selectedEmpresa?.razon_social || 'Servicios y Contratistas'}
                           </ThemedText>
                         </View>
                       </View>
@@ -516,7 +538,7 @@ export default function ScannerScreen() {
                       <View style={styles.dataCol}>
                         <ThemedText style={styles.dataLabel}>Placas</ThemedText>
                         <View style={styles.dataValueBox}>
-                          <ThemedText style={styles.dataValueBold}>{selectedVehicle.placa}</ThemedText>
+                          <ThemedText style={styles.dataValueBold}>{selectedVehicle.placas}</ThemedText>
                         </View>
                       </View>
                       <View style={styles.dataCol}>
@@ -533,14 +555,16 @@ export default function ScannerScreen() {
                       <View style={styles.dataCol}>
                         <ThemedText style={styles.dataLabel}>Conductor Asignado</ThemedText>
                         <View style={styles.dataValueBox}>
-                          <ThemedText style={styles.dataValue}>👤 {selectedVehicle.conductor}</ThemedText>
+                          <ThemedText style={styles.dataValue}>
+                            👤 {selectedConductor ? `${selectedConductor.nombre} ${selectedConductor.apellidos}` : 'No Registrado'}
+                          </ThemedText>
                         </View>
                       </View>
                       <View style={styles.dataCol}>
                         <ThemedText style={styles.dataLabel}>Vencimiento Corbatín</ThemedText>
                         <View style={styles.dataValueBox}>
                           <ThemedText style={styles.dataValue}>
-                            📅 {new Date(selectedCorbatin.fechaVencimiento).toLocaleDateString()}
+                            📅 {selectedCorbatin?.fecha_vencimiento ? new Date(selectedCorbatin.fecha_vencimiento).toLocaleDateString() : 'Vigente'}
                           </ThemedText>
                         </View>
                       </View>
@@ -570,14 +594,14 @@ export default function ScannerScreen() {
                 {/* Right Column: Foto, Botón de Infracción & Enlace */}
                 <View style={styles.identifiedRightCol}>
                   <Pressable
-                    onPress={() => setLightboxPhoto(selectedVehicle.fotoUrl || MOCK_PHOTOS[0])}
+                    onPress={() => setLightboxPhoto(selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[0])}
                     style={({ pressed }) => [
                       styles.photoReferenceCard,
                       pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
                     ]}
                   >
                     <Image
-                      source={{ uri: selectedVehicle.fotoUrl || MOCK_PHOTOS[0] }}
+                      source={{ uri: selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[0] }}
                       style={styles.referencePhotoImg}
                       resizeMode="cover"
                     />
@@ -638,7 +662,7 @@ export default function ScannerScreen() {
               <ThemedText style={styles.contextActiveTitle}>Infracción en Proceso</ThemedText>
             </View>
             <ThemedText style={styles.contextActiveDesc}>
-              {selectedVehicle.marca} {selectedVehicle.modelo} &bull; {selectedVehicle.placa} &bull; Corbatín #{selectedCorbatin?.numero}
+              {selectedVehicle.marca} {selectedVehicle.modelo} &bull; {selectedVehicle.placas} &bull; Corbatín #{selectedCorbatin?.numero}
             </ThemedText>
           </View>
 
@@ -652,7 +676,19 @@ export default function ScannerScreen() {
                   key={cat.id}
                   onPress={() => {
                     setSelectedCategory(cat.id);
-                    const matched = mockInfracciones.find((i) => i.codigo === cat.defaultCode) || mockInfracciones[0];
+                    const matched =
+                      catalogoInfracciones.find((i) => (i.codigo || '').toLowerCase() === cat.defaultCode.toLowerCase()) ||
+                      catalogoInfracciones.find((i) => (i.categoria || '').toLowerCase().includes(cat.id)) ||
+                      catalogoInfracciones[0] ||
+                      {
+                        id_infraccion: 1,
+                        id_reglamento: 1,
+                        codigo: cat.defaultCode,
+                        nombre: cat.name,
+                        descripcion: 'Falta a la normativa',
+                        categoria: cat.name,
+                        activo: true,
+                      };
                     setSelectedInfraccion(matched);
                   }}
                   style={[
@@ -800,17 +836,20 @@ export default function ScannerScreen() {
           {/* Wizard Step 2 Actions */}
           <View style={styles.wizardFooterRow}>
             <Pressable
-              onPress={() => {
+              onPress={async () => {
                 if (selectedVehicle && selectedInfraccion) {
-                  agregarReporte({
-                    vehiculoId: selectedVehicle.id,
-                    corbatinNumero: selectedCorbatin?.numero || 'C-2026-000',
-                    infraccionCodigo: selectedInfraccion.codigo,
-                    lugar: lugar,
-                    descripcion: descripcion || 'Borrador guardado.',
-                    observaciones: 'Guardado por el oficial.',
-                    evidencias: evidencias,
-                  }, 'borrador');
+                  await agregarReporte(
+                    {
+                      vehiculoId: String(selectedVehicle.id_vehiculo),
+                      corbatinNumero: String(selectedCorbatin?.numero || '0'),
+                      infraccionCodigo: selectedInfraccion.codigo,
+                      lugar: lugar,
+                      descripcion: descripcion || 'Borrador guardado.',
+                      observaciones: 'Guardado por el oficial.',
+                      evidencias: evidencias,
+                    },
+                    'borrador'
+                  );
                   alert('Borrador guardado exitosamente.');
                   router.replace('/');
                 }
@@ -867,8 +906,8 @@ export default function ScannerScreen() {
             <ThemedText style={styles.reviewCardText}>
               <ThemedText style={{ fontWeight: 'bold' }}>Corbatín:</ThemedText> #{selectedCorbatin?.numero}{'\n'}
               <ThemedText style={{ fontWeight: 'bold' }}>Vehículo:</ThemedText> {selectedVehicle.marca} {selectedVehicle.modelo} ({selectedVehicle.color}){'\n'}
-              <ThemedText style={{ fontWeight: 'bold' }}>Placas:</ThemedText> {selectedVehicle.placa}{'\n'}
-              <ThemedText style={{ fontWeight: 'bold' }}>Empresa:</ThemedText> {mockEmpresas.find((e) => e.id === selectedVehicle.empresaId)?.nombre}
+              <ThemedText style={{ fontWeight: 'bold' }}>Placas:</ThemedText> {selectedVehicle.placas}{'\n'}
+              <ThemedText style={{ fontWeight: 'bold' }}>Empresa:</ThemedText> {selectedEmpresa?.razon_social || 'Empresa Registrada HOA'}
             </ThemedText>
           </View>
 
@@ -1016,10 +1055,10 @@ export default function ScannerScreen() {
 
               <View style={styles.lightboxFooter}>
                 <ThemedText style={styles.lightboxPlate}>
-                  Placas: {selectedVehicle?.placa || 'N/A'} &bull; {selectedVehicle?.marca} {selectedVehicle?.modelo}
+                  Placas: {selectedVehicle?.placas || 'N/A'} &bull; {selectedVehicle?.marca} {selectedVehicle?.modelo}
                 </ThemedText>
                 <ThemedText style={styles.lightboxCompany}>
-                  {mockEmpresas.find((e) => e.id === selectedVehicle?.empresaId)?.nombre || 'Empresa Acreditada HOA'}
+                  {selectedEmpresa?.razon_social || 'Empresa Acreditada HOA'}
                 </ThemedText>
               </View>
             </View>

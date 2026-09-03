@@ -3,6 +3,7 @@ import {
   View,
   StyleSheet,
   Animated,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ThemedText } from './themed-text';
@@ -28,13 +29,13 @@ export function ResortHeader({ title, subtitle, rightElement }: ResortHeaderProp
       Animated.timing(fadeAnim, {
         toValue: 0.3,
         duration: 700,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }).start(() => {
         setPhotoIndex((prev) => (prev + 1) % RESORT_PHOTOS.length);
         Animated.timing(fadeAnim, {
           toValue: 1,
           duration: 700,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }).start();
       });
     }, 5500);

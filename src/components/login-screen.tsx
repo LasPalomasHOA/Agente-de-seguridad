@@ -45,7 +45,7 @@ export function LoginScreen() {
       Animated.timing(fadeAnim, {
         toValue: 0.2,
         duration: 800,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }).start(() => {
         // Change image
         setCurrentBgIndex((prev) => (prev + 1) % RESORT_BACKGROUNDS.length);
@@ -53,7 +53,7 @@ export function LoginScreen() {
         Animated.timing(fadeAnim, {
           toValue: 1,
           duration: 800,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }).start();
       });
     }, 6000);
@@ -61,16 +61,25 @@ export function LoginScreen() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleLogin = () => {
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async () => {
     setError(null);
     if (!usuario.trim() || !contrasena.trim()) {
       setError('Por favor, ingresa tu usuario y contraseña.');
       return;
     }
 
-    const success = login(usuario, contrasena);
-    if (!success) {
-      setError('Credenciales no válidas. Prueba: usuario "agente" / clave "1234"');
+    setLoading(true);
+    try {
+      const success = await login(usuario, contrasena);
+      if (!success) {
+        setError('Credenciales no válidas. Verifica con el administrador de seguridad.');
+      }
+    } catch {
+      setError('Error al verificar credenciales con el servidor.');
+    } finally {
+      setLoading(false);
     }
   };
 
