@@ -42,8 +42,8 @@ export default function ProfileScreen() {
       ]}
     >
       <Image
-        source={require('../../assets/images/logo.png')}
-        style={{ width: 190, height: 48, marginBottom: 14 }}
+        source={require('../../assets/images/lp-logo.png')}
+        style={{ width: 210, height: 56, marginBottom: 14 }}
         resizeMode="contain"
       />
 

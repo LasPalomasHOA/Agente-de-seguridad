@@ -9,10 +9,10 @@ import {
   ActivityIndicator,
   Animated,
   Dimensions,
-  SafeAreaView,
   Modal,
   Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMobile } from '../context/MobileContext';
 import { ThemedText } from '@/components/themed-text';
@@ -25,6 +25,7 @@ import { Select } from '../components/ui/select';
 import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
 import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
+import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 
 type Mode = 'camera' | 'loading' | 'result' | 'wizard' | 'confirmation';
 type WizardStep = 1 | 2 | 3;
@@ -64,6 +65,12 @@ export default function ScannerScreen() {
   const [sancionesActivas, setSancionesActivas] = useState<SancionDbRow[]>([]);
   const [catalogoInfracciones, setCatalogoInfracciones] = useState<CatalogoInfraccionRow[]>([]);
 
+  // Camera & Permissions states
+  const [permission, requestPermission] = useCameraPermissions();
+  const [facing, setFacing] = useState<CameraType>('back');
+  const [torch, setTorch] = useState<boolean>(false);
+  const [scanned, setScanned] = useState<boolean>(false);
+
   // Manual input state on scanner screen
   const [manualCorbatinInput, setManualCorbatinInput] = useState('');
   const [laserAnim] = useState(new Animated.Value(0));
@@ -98,13 +105,14 @@ export default function ScannerScreen() {
   }, []);
 
   const executeLookup = async (code: string) => {
-    if (!code.trim()) return;
+    const cleanCode = (code || '').trim();
+    if (!cleanCode) return;
     setLoadingText('Consultando base de datos HOA...');
     setMode('loading');
     try {
-      let res = await SupabaseService.buscarCorbatin(code);
+      let res = await SupabaseService.buscarCorbatin(cleanCode);
       if (!res) {
-        res = await SupabaseService.buscarVehiculoPorPlaca(code);
+        res = await SupabaseService.buscarVehiculoPorPlaca(cleanCode);
       }
       if (res && res.vehiculo) {
         setSelectedVehicle(res.vehiculo);
@@ -114,21 +122,41 @@ export default function ScannerScreen() {
         setSancionesActivas(res.sancionesActivas || []);
         setMode('result');
       } else {
-        alert(`No se encontró vehículo ni corbatín con "${code}" en la base de datos.`);
+        alert(`No se encontró vehículo ni corbatín con "${cleanCode}" en la base de datos.`);
         setMode('camera');
+        setScanned(false);
       }
     } catch (e) {
       alert('Error de conexión con la base de datos.');
       setMode('camera');
+      setScanned(false);
     }
   };
 
   // Handle incoming deep links (e.g. from index.tsx)
   useEffect(() => {
     if (params.corbatinNumero) {
-      executeLookup(params.corbatinNumero as string);
+      const codeParam = Array.isArray(params.corbatinNumero)
+        ? params.corbatinNumero[0]
+        : (params.corbatinNumero as string);
+      if (codeParam && codeParam.trim()) {
+        executeLookup(codeParam.trim());
+      }
     }
   }, [params.corbatinNumero]);
+
+  // Reset scanned state when returning to camera mode
+  useEffect(() => {
+    if (mode === 'camera') {
+      setScanned(false);
+    }
+  }, [mode]);
+
+  const handleBarcodeScanned = ({ data }: { data: string; type?: string }) => {
+    if (scanned || !data || mode !== 'camera') return;
+    setScanned(true);
+    executeLookup(data);
+  };
 
   // Animate laser line in camera mode
   useEffect(() => {
@@ -275,30 +303,110 @@ export default function ScannerScreen() {
             subtitle="Escanee el código QR del corbatín o ingrese el número."
             rightElement={
               <View style={styles.miniResortTagBadge}>
-                <ThemedText style={styles.miniResortTagText}>Cámara Activa</ThemedText>
+                <ThemedText style={styles.miniResortTagText}>
+                  {permission?.granted ? 'Cámara Activa' : 'Cámara'}
+                </ThemedText>
               </View>
             }
           />
 
-          {/* Dark Camera Viewfinder Box */}
+          {/* Camera Viewfinder Box */}
           <View style={styles.viewfinderDarkBox}>
-            <View style={styles.focusFrame}>
-              <Animated.View
-                style={[
-                  styles.laserLine,
-                  { backgroundColor: '#10B981', shadowColor: '#10B981', transform: [{ translateY: laserAnim }] },
-                ]}
-              />
-              {/* Emerald Green Corner Brackets */}
-              <View style={[styles.cornerBracket, styles.bracketTL, { borderColor: '#10B981' }]} />
-              <View style={[styles.cornerBracket, styles.bracketTR, { borderColor: '#10B981' }]} />
-              <View style={[styles.cornerBracket, styles.bracketBL, { borderColor: '#10B981' }]} />
-              <View style={[styles.cornerBracket, styles.bracketBR, { borderColor: '#10B981' }]} />
-            </View>
+            {!permission ? (
+              <View style={styles.cameraLoadingBox}>
+                <ActivityIndicator size="large" color="#10B981" />
+                <ThemedText style={styles.cameraLoadingText}>Inicializando sensor de cámara...</ThemedText>
+              </View>
+            ) : !permission.granted ? (
+              /* Permisos requeridos */
+              <View style={styles.permissionCard}>
+                <View style={styles.permissionIconCircle}>
+                  <Ionicons name="camera" size={32} color="#10B981" />
+                </View>
+                <ThemedText style={styles.permissionTitle}>Permiso de Cámara Requerido</ThemedText>
+                <ThemedText style={styles.permissionDesc}>
+                  Para escanear corbatines QR en tiempo real, autorice el acceso a la cámara de su dispositivo.
+                </ThemedText>
+                <Pressable
+                  onPress={requestPermission}
+                  style={({ pressed }) => [
+                    styles.grantPermissionBtn,
+                    pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+                  ]}
+                >
+                  <Ionicons name="shield-checkmark" size={18} color="#ffffff" style={{ marginRight: 6 }} />
+                  <ThemedText style={styles.grantPermissionBtnText}>Conceder Permiso</ThemedText>
+                </Pressable>
+              </View>
+            ) : (
+              /* Cámara en vivo con HUD */
+              <View style={styles.cameraFrameWrapper}>
+                <CameraView
+                  style={StyleSheet.absoluteFill}
+                  facing={facing}
+                  enableTorch={torch}
+                  barcodeScannerSettings={{
+                    barcodeTypes: ['qr'],
+                  }}
+                  onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
+                />
 
-            <ThemedText style={styles.viewfinderInstructions}>
-              Coloque el código QR del corbatín dentro del recuadro para escanear
-            </ThemedText>
+                {/* Camera Top Controls Bar */}
+                <View style={styles.cameraTopControls}>
+                  <View style={styles.liveBadgePill}>
+                    <View style={styles.liveBlinkingDot} />
+                    <ThemedText style={styles.liveBadgeText}>EN VIVO</ThemedText>
+                  </View>
+
+                  <View style={styles.cameraActionsRow}>
+                    {/* Torch toggle */}
+                    <Pressable
+                      onPress={() => setTorch(!torch)}
+                      style={[
+                        styles.cameraControlCircleBtn,
+                        torch && { backgroundColor: '#F59E0B', borderColor: '#FDE68A' },
+                      ]}
+                    >
+                      <Ionicons
+                        name={torch ? 'flashlight' : 'flashlight-outline'}
+                        size={18}
+                        color={torch ? '#0F172A' : '#ffffff'}
+                      />
+                    </Pressable>
+
+                    {/* Facing toggle */}
+                    <Pressable
+                      onPress={() => setFacing((prev) => (prev === 'back' ? 'front' : 'back'))}
+                      style={styles.cameraControlCircleBtn}
+                    >
+                      <Ionicons name="camera-reverse-outline" size={18} color="#ffffff" />
+                    </Pressable>
+                  </View>
+                </View>
+
+                {/* Focus Target Frame */}
+                <View style={styles.focusFrame}>
+                  <Animated.View
+                    style={[
+                      styles.laserLine,
+                      { backgroundColor: '#10B981', shadowColor: '#10B981', transform: [{ translateY: laserAnim }] },
+                    ]}
+                  />
+                  {/* Emerald Green Corner Brackets */}
+                  <View style={[styles.cornerBracket, styles.bracketTL, { borderColor: '#10B981' }]} />
+                  <View style={[styles.cornerBracket, styles.bracketTR, { borderColor: '#10B981' }]} />
+                  <View style={[styles.cornerBracket, styles.bracketBL, { borderColor: '#10B981' }]} />
+                  <View style={[styles.cornerBracket, styles.bracketBR, { borderColor: '#10B981' }]} />
+                </View>
+
+                {/* Bottom Instructions inside Camera */}
+                <View style={styles.cameraBottomPill}>
+                  <ThemedText style={styles.cameraBottomPillText}>
+                    Alinee el código QR dentro del recuadro
+                  </ThemedText>
+                </View>
+              </View>
+            )}
 
             {/* Quick Simulate Trigger in Palomas Emerald */}
             <Pressable
@@ -319,7 +427,7 @@ export default function ScannerScreen() {
           {/* Manual Input Card */}
           <View style={styles.manualEntryCard}>
             <ThemedText style={styles.manualEntryHeading}>Ingresar manualmente</ThemedText>
-            <ThemedText style={styles.manualEntryLabel}>Número de Corbatín</ThemedText>
+            <ThemedText style={styles.manualEntryLabel}>Número de Corbatín o Placas</ThemedText>
             <View style={styles.manualEntryRow}>
               <TextInput
                 value={manualCorbatinInput}
@@ -1178,9 +1286,142 @@ const styles = StyleSheet.create({
   viewfinderDarkBox: {
     backgroundColor: '#0F172A',
     borderRadius: 20,
-    padding: 24,
+    padding: 16,
     alignItems: 'center',
-    gap: 16,
+    gap: 14,
+  },
+  cameraFrameWrapper: {
+    width: '100%',
+    height: 320,
+    borderRadius: 16,
+    overflow: 'hidden',
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#020617',
+  },
+  cameraTopControls: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    right: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    zIndex: 10,
+  },
+  liveBadgePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+  },
+  liveBlinkingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#10B981',
+  },
+  liveBadgeText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  cameraActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  cameraControlCircleBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraBottomPill: {
+    position: 'absolute',
+    bottom: 12,
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    zIndex: 10,
+  },
+  cameraBottomPillText: {
+    color: 'rgba(255, 255, 255, 0.9)',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  cameraLoadingBox: {
+    height: 240,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  cameraLoadingText: {
+    color: 'rgba(255, 255, 255, 0.8)',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  permissionCard: {
+    paddingVertical: 28,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    gap: 12,
+    maxWidth: 280,
+  },
+  permissionIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  permissionTitle: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  permissionDesc: {
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 17,
+  },
+  grantPermissionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0D6E5F',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 12,
+    marginTop: 6,
+    shadowColor: '#0D6E5F',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  grantPermissionBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '900',
   },
   focusFrame: {
     width: 220,
@@ -1212,13 +1453,6 @@ const styles = StyleSheet.create({
   bracketTR: { top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3 },
   bracketBL: { bottom: 0, left: 0, borderBottomWidth: 3, borderLeftWidth: 3 },
   bracketBR: { bottom: 0, right: 0, borderBottomWidth: 3, borderRightWidth: 3 },
-  viewfinderInstructions: {
-    color: 'rgba(255, 255, 255, 0.75)',
-    fontSize: 12,
-    textAlign: 'center',
-    maxWidth: 240,
-    lineHeight: 16,
-  },
   simulateScanButton: {
     flexDirection: 'row',
     alignItems: 'center',

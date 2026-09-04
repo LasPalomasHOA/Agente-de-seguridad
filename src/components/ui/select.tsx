@@ -5,9 +5,9 @@ import {
   Pressable,
   Modal,
   FlatList,
-  SafeAreaView,
   Dimensions,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { ThemedText } from '../themed-text';
 import { useTheme } from '@/hooks/use-theme';

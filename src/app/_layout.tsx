@@ -5,9 +5,9 @@ import {
   Pressable,
   Image,
   useWindowDimensions,
-  SafeAreaView,
   Platform,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
 import { MobileProvider, useMobile } from '../context/MobileContext';
 import { LoginScreen } from '../components/login-screen';
@@ -49,7 +49,7 @@ function DashboardShell() {
           {/* Official Brand Logo & Subtitle */}
           <View style={styles.sidebarBrandSection}>
             <Image
-              source={require('@/assets/images/logo.png')}
+              source={require('@/assets/images/lp-logo.png')}
               style={styles.sidebarLogoImg}
               resizeMode="contain"
             />
@@ -128,7 +128,7 @@ function DashboardShell() {
           <View style={styles.mobileTopBar}>
             <View style={styles.mobileTopLeft}>
               <Image
-                source={require('@/assets/images/logo.png')}
+                source={require('@/assets/images/lp-logo.png')}
                 style={styles.mobileTopLogoImg}
                 resizeMode="contain"
               />
@@ -216,17 +216,19 @@ export default function RootLayout() {
   const [showSplash, setShowSplash] = useState(true);
 
   return (
-    <MobileProvider>
-      <View style={{ flex: 1, backgroundColor: '#042F2E' }}>
-        <DashboardShell />
-        {showSplash && (
-          <AnimatedSplashScreen
-            onFinish={() => setShowSplash(false)}
-            minDurationMs={1400}
-          />
-        )}
-      </View>
-    </MobileProvider>
+    <SafeAreaProvider>
+      <MobileProvider>
+        <View style={{ flex: 1, backgroundColor: '#042F2E' }}>
+          <DashboardShell />
+          {showSplash && (
+            <AnimatedSplashScreen
+              onFinish={() => setShowSplash(false)}
+              minDurationMs={1400}
+            />
+          )}
+        </View>
+      </MobileProvider>
+    </SafeAreaProvider>
   );
 }
 
@@ -252,20 +254,21 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   sidebarBrandSection: {
-    marginBottom: 16,
+    marginBottom: 20,
     gap: 4,
   },
   sidebarLogoImg: {
-    width: 155,
-    height: 38,
+    width: '100%',
+    maxWidth: 200,
+    height: 54,
     alignSelf: 'flex-start',
   },
   sidebarBrandSubtitle: {
     fontSize: 9.5,
     fontWeight: '800',
     color: '#0D6E5F',
-    letterSpacing: 0.6,
-    marginTop: 2,
+    letterSpacing: 0.8,
+    marginTop: 3,
   },
   sidebarDivider: {
     height: 1,
@@ -463,8 +466,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   mobileTopLogoImg: {
-    width: 125,
-    height: 32,
+    width: 150,
+    height: 42,
   },
   mobileTopRight: {
     flexDirection: 'row',

@@ -36,16 +36,20 @@
         }
       ],
       "expo-font",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Permitir a Las Palomas HOA acceder a la cámara para escanear corbatines vehiculares QR.",
+          "microphonePermission": "Permitir a Las Palomas HOA acceder al micrófono.",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    },
-    "extra": {
-      "eas": {
-        "projectId": "86f8278f-d4b8-468c-aae1-07d52c9e7b4a"
-      }
     }
   }
 }

@@ -57,7 +57,7 @@ export function ResortHeader({ title, subtitle, rightElement }: ResortHeaderProp
         colors={['rgba(13, 110, 95, 0.88)', 'rgba(7, 66, 57, 0.95)']}
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
-        style={StyleSheet.absoluteFillObject}
+        style={StyleSheet.absoluteFill}
       />
 
       <View style={styles.headerContent}>

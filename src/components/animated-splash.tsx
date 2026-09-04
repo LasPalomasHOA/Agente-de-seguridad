@@ -129,12 +129,12 @@ export function AnimatedSplashScreen({
 
   return (
     <Animated.View
+      pointerEvents="none"
       style={[
         styles.container,
         {
           opacity: containerOpacity,
           transform: [{ scale: containerScale }],
-          pointerEvents: 'none',
         },
       ]}
     >
@@ -213,7 +213,7 @@ export function AnimatedSplashScreen({
 
 const styles = StyleSheet.create({
   container: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     zIndex: 99999,
     justifyContent: 'center',
     alignItems: 'center',

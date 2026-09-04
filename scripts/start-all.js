@@ -37,7 +37,7 @@ async function main() {
       ['-r', 'dotenv/config', serverScript, `dotenv_config_path=${envPath}`],
       {
         cwd: path.resolve(__dirname, '..'),
-        stdio: 'inherit',
+        stdio: ['ignore', 'inherit', 'inherit'],
         shell: false,
       }
     );

@@ -65,18 +65,12 @@ export default function HomeDashboard() {
   const aprobadosCount = misReportes.filter((r) => r.estado === 'aprobado').length;
 
   const handleManualSearch = (code?: string) => {
-    const target = code || manualCode;
-    if (!target.trim()) return;
-
-    let targetNum = target.trim();
-    if (!targetNum.startsWith('C-') && /^\d+$/.test(targetNum)) {
-      const paddedNum = targetNum.padStart(3, '0');
-      targetNum = `C-2026-${paddedNum}`;
-    }
+    const target = (code || manualCode).trim();
+    if (!target) return;
 
     router.push({
       pathname: '/scanner',
-      params: { corbatinNumero: targetNum },
+      params: { corbatinNumero: target },
     });
   };
 
@@ -96,7 +90,7 @@ export default function HomeDashboard() {
           colors={['rgba(13, 110, 95, 0.88)', 'rgba(15, 23, 42, 0.95)']}
           start={{ x: 0, y: 0 }}
           end={{ x: 0, y: 1 }}
-          style={StyleSheet.absoluteFillObject}
+          style={StyleSheet.absoluteFill}
         />
 
         <View style={styles.heroBannerContent}>

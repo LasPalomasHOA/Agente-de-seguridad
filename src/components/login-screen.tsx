@@ -8,9 +8,9 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  SafeAreaView,
   Animated,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ThemedText } from './themed-text';
 import { useMobile } from '../context/MobileContext';
@@ -95,7 +95,7 @@ export function LoginScreen() {
       <Animated.Image
         source={RESORT_BACKGROUNDS[currentBgIndex]}
         style={[
-          StyleSheet.absoluteFillObject,
+          StyleSheet.absoluteFill,
           { opacity: fadeAnim, width: '100%', height: '100%' },
         ]}
         resizeMode="cover"
@@ -106,7 +106,7 @@ export function LoginScreen() {
         colors={['rgba(13, 110, 95, 0.88)', 'rgba(7, 66, 57, 0.94)']}
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
-        style={StyleSheet.absoluteFillObject}
+        style={StyleSheet.absoluteFill}
       />
 
       {/* Slide Indicators on Top Right */}
@@ -124,7 +124,7 @@ export function LoginScreen() {
 
       <SafeAreaView style={styles.safeContainer}>
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={{ flex: 1 }}
         >
           <ScrollView
@@ -137,7 +137,7 @@ export function LoginScreen() {
               {/* Official Logo at Top of Card */}
               <View style={styles.cardHeaderBox}>
                 <Image
-                  source={require('@/assets/images/logo.png')}
+                  source={require('@/assets/images/lp-logo.png')}
                   style={styles.cardLogoImg}
                   resizeMode="contain"
                 />
@@ -271,6 +271,8 @@ const styles = StyleSheet.create({
   },
   safeContainer: {
     flex: 1,
+    zIndex: 10,
+    position: 'relative',
   },
   bgIndicatorsBox: {
     position: 'absolute',
@@ -278,7 +280,7 @@ const styles = StyleSheet.create({
     right: 20,
     flexDirection: 'row',
     gap: 6,
-    zIndex: 10,
+    zIndex: 30,
     backgroundColor: 'rgba(0,0,0,0.3)',
     paddingHorizontal: 8,
     paddingVertical: 4,
@@ -295,23 +297,26 @@ const styles = StyleSheet.create({
     backgroundColor: '#10B981',
   },
   scrollContent: {
-    padding: Spacing.four,
+    paddingHorizontal: 20,
+    paddingVertical: 32,
     justifyContent: 'center',
     alignItems: 'center',
     flexGrow: 1,
+    minHeight: '100%',
   },
   glassCard: {
     width: '100%',
     maxWidth: 440,
     backgroundColor: '#ffffff',
     borderRadius: 24,
-    padding: 28,
+    padding: 24,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 16 },
     shadowOpacity: 0.3,
     shadowRadius: 24,
     elevation: 12,
     gap: 16,
+    zIndex: 20,
   },
   cardHeaderBox: {
     alignItems: 'center',
@@ -319,9 +324,9 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   cardLogoImg: {
-    width: 170,
-    height: 44,
-    marginBottom: 4,
+    width: 210,
+    height: 58,
+    marginBottom: 6,
   },
   cardMainTitle: {
     fontSize: 18,
