@@ -49,13 +49,12 @@ async function main() {
 
   // Iniciar Expo
   console.log(`\x1b[35m[Expo App]\x1b[0m Levantando aplicación móvil...`);
-  const isWindows = process.platform === 'win32';
-  const expoCmd = isWindows ? 'npx.cmd' : 'npx';
+  const expoCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
   const expoProcess = spawn(expoCmd, ['expo', 'start', ...args], {
     cwd: path.resolve(__dirname, '..'),
     stdio: 'inherit',
-    shell: false,
+    shell: true,
   });
 
   // Manejo de apagado limpio

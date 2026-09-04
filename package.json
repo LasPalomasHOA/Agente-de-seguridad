@@ -36,6 +36,7 @@
   },
   "scripts": {
     "start": "node scripts/start-all.js",
+    "dev": "node scripts/start-all.js",
     "web": "node scripts/start-all.js --web",
     "android": "node scripts/start-all.js --android",
     "ios": "node scripts/start-all.js --ios",

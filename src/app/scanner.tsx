@@ -40,12 +40,12 @@ const SAMPLE_EVIDENCIA_PHOTOS = [
 ];
 
 const INFRACTION_CATEGORIES = [
-  { id: 'estacionamiento', name: 'Estacionamiento', icon: 'car-outline', defaultCode: 'EST-01' },
-  { id: 'epp', name: 'EPP Ausente', icon: 'construct-outline', defaultCode: 'SEG-02' },
-  { id: 'ruido', name: 'Ruido Excesivo', icon: 'volume-high-outline', defaultCode: 'CON-01' },
-  { id: 'dano', name: 'Daño Instalaciones', icon: 'hammer-outline', defaultCode: 'DAN-01' },
-  { id: 'seguridad', name: 'Brecha Seguridad', icon: 'shield-alert-outline', defaultCode: 'SEG-01' },
-  { id: 'otros', name: 'Otros', icon: 'ellipsis-horizontal-circle-outline', defaultCode: 'OTR-01' },
+  { id: 'estacionamiento', name: 'Estacionamiento', icon: 'car-outline', defaultCode: 'INF-04' },
+  { id: 'epp', name: 'EPP Ausente', icon: 'construct-outline', defaultCode: 'INF-03' },
+  { id: 'horario', name: 'Fuera de Horario', icon: 'time-outline', defaultCode: 'INF-02' },
+  { id: 'velocidad', name: 'Exceso Velocidad', icon: 'speedometer-outline', defaultCode: 'INF-01' },
+  { id: 'corbatin', name: 'Sin Corbatín QR', icon: 'qr-code-outline', defaultCode: 'INF-05' },
+  { id: 'escombros', name: 'Escombros/Basura', icon: 'trash-outline', defaultCode: 'INF-06' },
 ];
 
 export default function ScannerScreen() {
@@ -175,14 +175,14 @@ export default function ScannerScreen() {
 
   const startReportWizard = () => {
     setStep(1);
-    setSelectedCategory('seguridad');
-    const defaultInf = catalogoInfracciones.find((i) => i.codigo === 'SEG-01') || catalogoInfracciones[0] || {
+    setSelectedCategory('estacionamiento');
+    const defaultInf = catalogoInfracciones.find((i) => i.codigo === 'INF-04') || catalogoInfracciones[0] || {
       id_infraccion: 1,
       id_reglamento: 1,
-      codigo: 'INF-01',
-      nombre: 'Infracción General',
-      descripcion: 'Reporte de falta',
-      categoria: 'Seguridad',
+      codigo: 'INF-04',
+      nombre: 'Estacionamiento en áreas no autorizadas',
+      descripcion: 'Bloquear banquetas, rampas o cajones de condóminos con unidades de trabajo',
+      categoria: 'VEHÍCULOS',
       activo: true,
     };
     setSelectedInfraccion(defaultInf);
@@ -235,8 +235,11 @@ export default function ScannerScreen() {
       const folio = await agregarReporte(
         {
           vehiculoId: String(selectedVehicle.id_vehiculo),
-          corbatinNumero: String(selectedCorbatin?.numero || '0'),
+          corbatinNumero: selectedCorbatin?.numero ? `C-2026-${String(selectedCorbatin.numero).padStart(3, '0')}` : 'S/C',
           infraccionCodigo: selectedInfraccion.codigo,
+          idVehiculo: Number(selectedVehicle.id_vehiculo),
+          idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
+          idInfraccion: Number(selectedInfraccion.id_infraccion) || 1,
           lugar: lugar,
           descripcion: descripcion || 'Infracción reportada durante inspección de seguridad.',
           observaciones: 'Evidencias registradas desde el dispositivo de oficial.',
@@ -247,8 +250,8 @@ export default function ScannerScreen() {
 
       setGeneratedFolio(folio);
       setMode('confirmation');
-    } catch {
-      alert('Error al registrar el reporte.');
+    } catch (err: any) {
+      alert(`Error al registrar el reporte: ${err?.message || 'Error de conexión'}`);
     } finally {
       setSubmitting(false);
     }

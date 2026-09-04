@@ -23,7 +23,12 @@ interface MobileContextType {
   logout: () => void;
   cargarReportes: () => Promise<void>;
   agregarReporte: (
-    nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'>,
+    nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
+      idVehiculo?: number;
+      idCorbatin?: number | null;
+      idInfraccion?: number;
+      idUsuario?: number;
+    },
     estado?: 'pendiente' | 'borrador'
   ) => Promise<string>;
   actualizarReporte: (reporte: ReporteInfraccion) => void;
@@ -147,7 +152,12 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const agregarReporte = async (
-    nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'>,
+    nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
+      idVehiculo?: number;
+      idCorbatin?: number | null;
+      idInfraccion?: number;
+      idUsuario?: number;
+    },
     estado: 'pendiente' | 'borrador' = 'pendiente'
   ): Promise<string> => {
     const now = new Date();
@@ -158,18 +168,37 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     let dbReporteId: number | null = null;
 
-    // Guardar en la base de datos Supabase
+    // Guardar en la base de datos Supabase / API Express
     try {
-      const vehIdNum = parseInt(nuevo.vehiculoId.replace(/\D/g, '') || '1', 10);
-      const corbIdNum = parseInt(nuevo.corbatinNumero.replace(/\D/g, '') || '0', 10);
-      const usrIdNum = parseInt(agenteActual.id.replace(/\D/g, '') || '1', 10);
-      const infIdNum = parseInt(nuevo.infraccionCodigo.replace(/\D/g, '') || '1', 10);
+      let vehIdNum = nuevo.idVehiculo;
+      if (!vehIdNum) {
+        vehIdNum = parseInt(nuevo.vehiculoId.replace(/\D/g, '') || '1', 10);
+      }
+
+      let corbIdNum = nuevo.idCorbatin;
+      if (corbIdNum === undefined) {
+        corbIdNum = null;
+      }
+
+      let infIdNum = nuevo.idInfraccion;
+      if (!infIdNum) {
+        const catalogo = await SupabaseService.getCatalogoInfracciones();
+        const found = catalogo.find(
+          (c) => (c.codigo || '').toLowerCase() === (nuevo.infraccionCodigo || '').toLowerCase()
+        );
+        infIdNum = found ? Number(found.id_infraccion) : 1;
+      }
+
+      let usrIdNum = nuevo.idUsuario;
+      if (!usrIdNum) {
+        usrIdNum = parseInt(agenteActual.id.replace(/\D/g, '') || '1', 10) || 1;
+      }
 
       const dbRes = await SupabaseService.crearReporteInfraccion({
-        idVehiculo: vehIdNum,
-        idCorbatin: corbIdNum > 0 ? corbIdNum : null,
-        idInfraccion: infIdNum,
-        idUsuario: usrIdNum,
+        idVehiculo: Number(vehIdNum) || 1,
+        idCorbatin: corbIdNum && Number(corbIdNum) > 0 ? Number(corbIdNum) : null,
+        idInfraccion: Number(infIdNum) || 1,
+        idUsuario: Number(usrIdNum) || 1,
         ubicacionTexto: nuevo.lugar,
         descripcionHechos: nuevo.descripcion,
         evidenciasUrls: nuevo.evidencias.map((e) => e.fotoUrl),
