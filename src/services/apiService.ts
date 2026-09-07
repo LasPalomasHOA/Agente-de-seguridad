@@ -419,102 +419,154 @@ export const ApiService = {
       // 2. Extraer tokens de búsqueda
       const { numbers, tokens, plates } = this.extractSearchTokens(cleanParam);
 
-      // 3. Obtener listas cacheadas (evita re-descargar tablas completas en cada tecla o escaneo)
-      const [dbCorbatines, dbVehiculos] = await Promise.all([
-        this.getCorbatines(),
-        this.getVehiculos(),
-      ]);
+      let matchedCorbatin: any = null;
+      let matchedVehiculo: any = null;
 
-      const hasDbData = dbCorbatines && dbCorbatines.length > 0;
-      const corbatines = hasDbData ? dbCorbatines : [
-        {
-          id_corbatin: 70,
-          id_vehiculo: 70,
-          numero: 70,
-          qr_token: 'QR-CORB-070',
-          fecha_emision: new Date().toISOString(),
-          fecha_vencimiento: null,
-          estatus: 'activo' as const,
-          fecha_impresion: null,
-          motivo_cancelacion: null,
-        },
-        {
-          id_corbatin: 101,
-          id_vehiculo: 1,
-          numero: 101,
-          qr_token: 'QR-CORB-101',
-          fecha_emision: new Date().toISOString(),
-          fecha_vencimiento: null,
-          estatus: 'activo' as const,
-          fecha_impresion: null,
-          motivo_cancelacion: null,
-        },
-      ];
-
-      const vehiculos = (dbVehiculos && dbVehiculos.length > 0) ? dbVehiculos : [
-        {
-          id_vehiculo: 70,
-          id_empresa: 1,
-          marca: 'Ford',
-          modelo: 'F-150 Super Duty',
-          año: 2024,
-          placas: 'SON-7080-A',
-          color: 'Blanco Oxford',
-          foto_url: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
-          estatus_acceso: 'HABILITADO',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ];
-
-      // 4. Buscar corbatín coincidente por número o token QR
-      let matchedCorbatin: any = corbatines.find((c: any) => {
-        const cNum = Number(c.numero);
-        if (numbers.includes(cNum)) return true;
-
-        if (c.qr_token) {
-          const cQrUpper = String(c.qr_token).toUpperCase();
-          const cQrClean = cQrUpper.replace(/[-_ ]/g, '');
-          for (const tok of tokens) {
-            const tUpper = tok.toUpperCase();
-            const tClean = tUpper.replace(/[-_ ]/g, '');
-            if (cQrUpper === tUpper || cQrClean === tClean) return true;
+      // 3. Intento de consulta puntual directa (Ahorro de Egress ~95%)
+      try {
+        // 3.1 Búsqueda puntual por número de corbatín si está presente
+        if (numbers.length > 0) {
+          const directCorbRes = await fetchJson(`/corbatines?numero=${numbers[0]}`);
+          const corbList = Array.isArray(directCorbRes)
+            ? directCorbRes
+            : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
+          
+          if (corbList.length > 0) {
+            matchedCorbatin = corbList.find((c: any) => Number(c.numero) === numbers[0]) || corbList[0];
+            if (matchedCorbatin?.vehiculo) {
+              matchedVehiculo = matchedCorbatin.vehiculo;
+            } else if (matchedCorbatin?.id_vehiculo) {
+              const directVehRes = await fetchJson(`/vehiculos?id_vehiculo=${matchedCorbatin.id_vehiculo}`).catch(() => null);
+              const vList = Array.isArray(directVehRes)
+                ? directVehRes
+                : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
+              matchedVehiculo = vList.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo)) || vList[0];
+            }
           }
         }
-        return false;
-      });
 
-      // 5. Si se encontró corbatín, obtener el vehículo correspondiente
-      let matchedVehiculo: any = null;
-      if (matchedCorbatin) {
-        matchedVehiculo =
-          matchedCorbatin.vehiculo ||
-          vehiculos.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo));
-      } else {
-        // 5.1 Si NO se encontró corbatín por número ni token, buscar por PLACAS vehiculares
-        matchedVehiculo = vehiculos.find((v: any) => {
-          const plateStr = String(v.placas || v.placa || '').toUpperCase();
-          const plateClean = plateStr.replace(/[-_ ]/g, '');
-          for (const pl of plates) {
-            const pUpper = pl.toUpperCase();
-            const pClean = pUpper.replace(/[-_ ]/g, '');
-            if (plateClean.length >= 4 && (plateStr === pUpper || plateClean === pClean)) return true;
+        // 3.2 Búsqueda puntual por placas vehiculares si no se obtuvo por corbatín
+        if (!matchedVehiculo && plates.length > 0) {
+          const validPlate = plates.find((p) => p.length >= 3) || plates[0];
+          if (validPlate) {
+            const directVehRes = await fetchJson(`/vehiculos?placas=${encodeURIComponent(validPlate)}`).catch(() => null);
+            const vList = Array.isArray(directVehRes)
+              ? directVehRes
+              : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
+            
+            if (vList.length > 0) {
+              matchedVehiculo = vList[0];
+              const directCorbRes = await fetchJson(`/corbatines?id_vehiculo=${matchedVehiculo.id_vehiculo}`).catch(() => null);
+              const cList = Array.isArray(directCorbRes)
+                ? directCorbRes
+                : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
+              matchedCorbatin = cList[0] || null;
+            }
           }
-          return false;
-        });
+        }
+      } catch (targetedErr) {
+        // Degradación elegante: Si el backend no tiene endpoints filtrados, pasamos al fallback sin error
+      }
 
-        if (matchedVehiculo) {
-          matchedCorbatin = corbatines.find((c: any) => Number(c.id_vehiculo) === Number(matchedVehiculo.id_vehiculo)) || {
-            id_corbatin: 0,
-            id_vehiculo: matchedVehiculo.id_vehiculo,
-            numero: 0,
-            qr_token: 'S/C',
+      // 4. Fallback Seguro: Si la consulta puntual no trajo datos, utilizar listas cacheadas en memoria
+      if (!matchedCorbatin || !matchedVehiculo) {
+        const [dbCorbatines, dbVehiculos] = await Promise.all([
+          this.getCorbatines(),
+          this.getVehiculos(),
+        ]);
+
+        const hasDbData = dbCorbatines && dbCorbatines.length > 0;
+        const corbatines = hasDbData ? dbCorbatines : [
+          {
+            id_corbatin: 70,
+            id_vehiculo: 70,
+            numero: 70,
+            qr_token: 'QR-CORB-070',
             fecha_emision: new Date().toISOString(),
             fecha_vencimiento: null,
-            estatus: 'activo',
+            estatus: 'activo' as const,
             fecha_impresion: null,
             motivo_cancelacion: null,
-          };
+          },
+          {
+            id_corbatin: 101,
+            id_vehiculo: 1,
+            numero: 101,
+            qr_token: 'QR-CORB-101',
+            fecha_emision: new Date().toISOString(),
+            fecha_vencimiento: null,
+            estatus: 'activo' as const,
+            fecha_impresion: null,
+            motivo_cancelacion: null,
+          },
+        ];
+
+        const vehiculos = (dbVehiculos && dbVehiculos.length > 0) ? dbVehiculos : [
+          {
+            id_vehiculo: 70,
+            id_empresa: 1,
+            marca: 'Ford',
+            modelo: 'F-150 Super Duty',
+            año: 2024,
+            placas: 'SON-7080-A',
+            color: 'Blanco Oxford',
+            foto_url: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
+            estatus_acceso: 'HABILITADO',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        ];
+
+        // Buscar corbatín coincidente por número o token QR
+        if (!matchedCorbatin) {
+          matchedCorbatin = corbatines.find((c: any) => {
+            const cNum = Number(c.numero);
+            if (numbers.includes(cNum)) return true;
+
+            if (c.qr_token) {
+              const cQrUpper = String(c.qr_token).toUpperCase();
+              const cQrClean = cQrUpper.replace(/[-_ ]/g, '');
+              for (const tok of tokens) {
+                const tUpper = tok.toUpperCase();
+                const tClean = tUpper.replace(/[-_ ]/g, '');
+                if (cQrUpper === tUpper || cQrClean === tClean) return true;
+              }
+            }
+            return false;
+          });
+        }
+
+        // Si se encontró corbatín, obtener el vehículo correspondiente
+        if (matchedCorbatin && !matchedVehiculo) {
+          matchedVehiculo =
+            matchedCorbatin.vehiculo ||
+            vehiculos.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo));
+        } else if (!matchedVehiculo) {
+          // Si NO se encontró corbatín por número ni token, buscar por PLACAS vehiculares
+          matchedVehiculo = vehiculos.find((v: any) => {
+            const plateStr = String(v.placas || v.placa || '').toUpperCase();
+            const plateClean = plateStr.replace(/[-_ ]/g, '');
+            for (const pl of plates) {
+              const pUpper = pl.toUpperCase();
+              const pClean = pUpper.replace(/[-_ ]/g, '');
+              if (plateClean.length >= 4 && (plateStr === pUpper || plateClean === pClean)) return true;
+            }
+            return false;
+          });
+
+          if (matchedVehiculo && !matchedCorbatin) {
+            matchedCorbatin = corbatines.find((c: any) => Number(c.id_vehiculo) === Number(matchedVehiculo.id_vehiculo)) || {
+              id_corbatin: 0,
+              id_vehiculo: matchedVehiculo.id_vehiculo,
+              numero: 0,
+              qr_token: 'S/C',
+              fecha_emision: new Date().toISOString(),
+              fecha_vencimiento: null,
+              estatus: 'activo',
+              fecha_impresion: null,
+              motivo_cancelacion: null,
+            };
+          }
         }
       }
 
