@@ -50,15 +50,23 @@ export default function ProfileScreen() {
       <View
         style={[
           styles.avatarContainer,
-          { backgroundColor: theme.primaryLight || '#E6F4F1', borderColor: theme.primary },
+          { backgroundColor: theme.primaryLight || '#E6F4F1', borderColor: theme.primary, overflow: 'hidden' },
         ]}
       >
-        <ThemedText style={[styles.avatarText, { color: theme.primary }]}>
-          {(agenteActual?.nombre || 'Oficial')
-            .split(' ')
-            .map((n: string) => n[0] || '')
-            .join('')}
-        </ThemedText>
+        {agenteActual?.avatarUrl ? (
+          <Image
+            source={{ uri: agenteActual.avatarUrl }}
+            style={{ width: '100%', height: '100%' }}
+            resizeMode="cover"
+          />
+        ) : (
+          <ThemedText style={[styles.avatarText, { color: theme.primary }]}>
+            {(agenteActual?.nombre || 'Oficial')
+              .split(' ')
+              .map((n: string) => n[0] || '')
+              .join('')}
+          </ThemedText>
+        )}
         <View style={[styles.statusIndicator, { backgroundColor: theme.success }]} />
       </View>
 

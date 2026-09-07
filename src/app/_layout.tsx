@@ -19,7 +19,7 @@ import { Ionicons } from '@expo/vector-icons';
 SplashScreen.preventAutoHideAsync();
 
 function DashboardShell() {
-  const { isAuthenticated, logout } = useMobile();
+  const { isAuthenticated, logout, agenteActual } = useMobile();
   const router = useRouter();
   const pathname = usePathname();
   const { width } = useWindowDimensions();
@@ -36,6 +36,15 @@ function DashboardShell() {
   ];
 
   const currentPath = pathname || '/';
+
+  const getShortName = (fullName?: string) => {
+    if (!fullName) return 'Oficial';
+    const clean = fullName.replace(/^(?:Ing\.?|Lic\.?|Oficial|Guardia)\s+/i, '').trim();
+    const parts = clean.split(' ').filter(Boolean);
+    if (parts.length === 0) return 'Oficial';
+    if (parts.length === 1) return parts[0];
+    return `${parts[0][0]}. ${parts[parts.length - 1]}`;
+  };
 
   if (!isAuthenticated) {
     return <LoginScreen />;
@@ -57,6 +66,34 @@ function DashboardShell() {
               CONTROL OPERATIVO &bull; SEGURIDAD
             </ThemedText>
           </View>
+
+          {/* Dynamic Logged-in Officer Profile Card */}
+          <View style={styles.officerRow}>
+            <View style={styles.avatarWrap}>
+              <Image
+                source={{
+                  uri:
+                    agenteActual?.avatarUrl ||
+                    'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=200',
+                }}
+                style={styles.officerPhotoAvatar}
+              />
+              <View style={styles.onlineBadgeDot} />
+            </View>
+            <View style={styles.officerTextCol}>
+              <ThemedText style={styles.officerNameText} numberOfLines={1}>
+                {agenteActual?.nombre || 'Oficial en Servicio'}
+              </ThemedText>
+              <ThemedText style={styles.officerRoleText} numberOfLines={1}>
+                {agenteActual?.rol || 'Agente de Seguridad'}
+              </ThemedText>
+              <ThemedText style={styles.officerShiftText} numberOfLines={1}>
+                {agenteActual?.numEmpleado || 'AG-2026-001'}
+              </ThemedText>
+            </View>
+          </View>
+
+          <View style={styles.sidebarDivider} />
 
           {/* Section Heading */}
           <View style={styles.navSectionHeader}>
@@ -137,7 +174,9 @@ function DashboardShell() {
             <View style={styles.mobileTopRight}>
               <View style={styles.officerDutyPill}>
                 <View style={styles.liveDot} />
-                <ThemedText style={styles.officerDutyText}>C. Ramírez</ThemedText>
+                <ThemedText style={styles.officerDutyText}>
+                  {getShortName(agenteActual?.nombre)}
+                </ThemedText>
               </View>
               <Pressable
                 onPress={logout}

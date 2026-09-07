@@ -1,16 +1,76 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { Platform } from 'react-native';
 import { Agente } from '../types/agente';
 import { ReporteInfraccion } from '../types/reporte';
 import { SupabaseService } from '../services/supabaseService';
 
+const safeStorage = {
+  getItem: (key: string): string | null => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        return window.localStorage.getItem(key);
+      }
+    } catch {}
+    return null;
+  },
+  setItem: (key: string, value: string): void => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(key, value);
+      }
+    } catch {}
+  },
+  removeItem: (key: string): void => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(key);
+      }
+    } catch {}
+  },
+};
+
+const computeTurno = (): string => {
+  const hour = new Date().getHours();
+  if (hour >= 6 && hour < 14) {
+    return 'Turno Matutino (06:00 - 14:00)';
+  } else if (hour >= 14 && hour < 22) {
+    return 'Turno Vespertino (14:00 - 22:00)';
+  } else {
+    return 'Turno Nocturno (22:00 - 06:00)';
+  }
+};
+
+const computeZona = (rolName?: string): string => {
+  const r = (rolName || '').toLowerCase();
+  if (r.includes('supervisor')) {
+    return 'Supervisión General & Recorridos';
+  }
+  if (r.includes('admin')) {
+    return 'Oficinas Administrativas HOA';
+  }
+  if (r.includes('proveedor')) {
+    return 'Acceso Proveedores y Contratistas';
+  }
+  return 'Caseta Acceso Principal (Sector 4)';
+};
+
+const getAvatarUrl = (nombre?: string, avatar?: string | null): string => {
+  if (avatar && typeof avatar === 'string' && avatar.trim().length > 0) {
+    return avatar.trim();
+  }
+  return 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=200';
+};
+
 const DEFAULT_AGENTE: Agente = {
   id: 'usr_1',
-  nombre: 'Oficial de Guardia',
+  nombre: 'Oficial de Seguridad',
+  correo: 'seguridad@laspalomashoa.com',
+  rol: 'Oficial',
   numEmpleado: 'AG-2026-001',
-  turno: 'Matutino (06:00 - 14:00)',
-  zona: 'Caseta Principal & Fase 1',
+  turno: computeTurno(),
+  zona: 'Caseta Acceso Principal (Sector 4)',
   estadoServicio: 'activo',
-  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=300',
+  avatarUrl: getAvatarUrl('Oficial de Seguridad', null),
 };
 
 interface MobileContextType {
@@ -86,58 +146,114 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   useEffect(() => {
-    try {
-      const localAuth = localStorage.getItem('hoa_mobile_auth');
-      const localAgente = localStorage.getItem('hoa_mobile_agente');
-      const localTheme = localStorage.getItem('hoa_mobile_theme');
+    const syncUserWithDb = async () => {
+      try {
+        const localAuth = safeStorage.getItem('hoa_mobile_auth');
+        const localAgente = safeStorage.getItem('hoa_mobile_agente');
+        const localTheme = safeStorage.getItem('hoa_mobile_theme');
 
-      if (localAuth === 'true') {
-        setIsAuthenticated(true);
-      }
-      if (localAgente) {
-        setAgenteActual(JSON.parse(localAgente));
-      }
-      if (localTheme === 'light' || localTheme === 'dark') {
-        setThemeMode(localTheme);
-      }
-    } catch (e) {}
+        if (localAuth === 'true') {
+          setIsAuthenticated(true);
+        }
+        if (localTheme === 'light' || localTheme === 'dark') {
+          setThemeMode(localTheme);
+        }
 
+        let parsed: any = null;
+        if (localAgente) {
+          try {
+            parsed = JSON.parse(localAgente);
+          } catch {}
+        }
+
+        // Sincronizar usuario activo directamente con la base de datos PostgreSQL
+        const users = await SupabaseService.getUsuarios();
+        if (users && users.length > 0) {
+          let found: any = null;
+          if (parsed) {
+            found = users.find(
+              (u: any) =>
+                String(u.id_usuario || u.id) === String(parsed.id) ||
+                (u.correo && parsed.correo && u.correo.toLowerCase() === parsed.correo.toLowerCase()) ||
+                (u.nombre && parsed.nombre && u.nombre.toLowerCase() === parsed.nombre.toLowerCase())
+            );
+          }
+          if (!found) {
+            // Usuario predeterminado en servicio (Kenet / Carlos Méndez / Caseta)
+            found = users.find(
+              (u: any) =>
+                u.nombre?.toLowerCase().includes('kenet') ||
+                (u.rolNombre || u.rol || '').toLowerCase().includes('agente') ||
+                (u.rolNombre || u.rol || '').toLowerCase().includes('caseta') ||
+                u.nombre?.toLowerCase().includes('carlos')
+            ) || users[0];
+          }
+
+          if (found) {
+            const role = found.rolNombre || found.rol || 'Agente de Seguridad';
+            const dbAvatar = getAvatarUrl(found.nombre, found.foto_url || found.avatar || found.foto || found.imagen);
+            const syncedAgente: Agente = {
+              id: String(found.id_usuario || found.id || 1),
+              nombre: found.nombre || 'Oficial en Servicio',
+              correo: found.correo || '',
+              rol: role,
+              numEmpleado: `AG-2026-${String(found.id_usuario || found.id || 1).padStart(3, '0')}`,
+              turno: computeTurno(),
+              zona: computeZona(role),
+              estadoServicio: 'activo',
+              avatarUrl: dbAvatar,
+            };
+            setAgenteActual(syncedAgente);
+            safeStorage.setItem('hoa_mobile_agente', JSON.stringify(syncedAgente));
+          }
+        } else if (parsed) {
+          setAgenteActual({
+            ...parsed,
+            turno: computeTurno(),
+            zona: parsed.zona || computeZona(parsed.rol),
+            avatarUrl: getAvatarUrl(parsed.nombre, parsed.foto_url || parsed.avatarUrl || parsed.avatar),
+          });
+        }
+      } catch (e) {
+        console.warn('Error syncing user with DB:', e);
+      }
+    };
+
+    syncUserWithDb();
     cargarReportes();
   }, []);
 
   const saveReportes = (newReportes: ReporteInfraccion[]) => {
     setReportes(newReportes);
-    try {
-      localStorage.setItem('hoa_mobile_reportes', JSON.stringify(newReportes));
-    } catch (e) {}
+    safeStorage.setItem('hoa_mobile_reportes', JSON.stringify(newReportes));
   };
 
   const toggleTheme = () => {
     const nextTheme = themeMode === 'light' ? 'dark' : 'light';
     setThemeMode(nextTheme);
-    try {
-      localStorage.setItem('hoa_mobile_theme', nextTheme);
-    } catch (e) {}
+    safeStorage.setItem('hoa_mobile_theme', nextTheme);
   };
 
   const login = async (usuario: string, contrasena: string): Promise<boolean> => {
     const dbUser = await SupabaseService.login(usuario, contrasena);
     if (dbUser) {
+      const role = dbUser.rolNombre || dbUser.roles?.nombre || dbUser.rol || 'Agente de Seguridad';
+      const avatar = getAvatarUrl(dbUser.nombre, dbUser.foto_url || dbUser.avatar || dbUser.avatarUrl || dbUser.foto);
       const agente: Agente = {
-        id: String(dbUser.id_usuario || 1),
+        id: String(dbUser.id_usuario || dbUser.id || 1),
         nombre: dbUser.nombre || 'Oficial de Seguridad',
-        numEmpleado: dbUser.numEmpleado || `AG-2026-${String(dbUser.id_usuario || 1).padStart(3, '0')}`,
-        turno: 'Turno en Servicio',
-        zona: 'Residencial Las Palomas',
+        correo: dbUser.correo || '',
+        rol: role,
+        numEmpleado: dbUser.numEmpleado || `AG-2026-${String(dbUser.id_usuario || dbUser.id || 1).padStart(3, '0')}`,
+        turno: computeTurno(),
+        zona: computeZona(role),
         estadoServicio: 'activo',
-        avatarUrl: DEFAULT_AGENTE.avatarUrl,
+        avatarUrl: avatar,
       };
       setAgenteActual(agente);
       setIsAuthenticated(true);
-      try {
-        localStorage.setItem('hoa_mobile_auth', 'true');
-        localStorage.setItem('hoa_mobile_agente', JSON.stringify(agente));
-      } catch (e) {}
+      safeStorage.setItem('hoa_mobile_auth', 'true');
+      safeStorage.setItem('hoa_mobile_agente', JSON.stringify(agente));
       cargarReportes();
       return true;
     }
@@ -146,9 +262,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const logout = () => {
     setIsAuthenticated(false);
-    try {
-      localStorage.removeItem('hoa_mobile_auth');
-    } catch (e) {}
+    safeStorage.removeItem('hoa_mobile_auth');
   };
 
   const agregarReporte = async (

@@ -60,9 +60,28 @@ export default function HomeDashboard() {
     return () => clearInterval(timer);
   }, []);
 
+  // Live real-time clock
+  const [currentTime, setCurrentTime] = useState(() => {
+    const now = new Date();
+    return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+  });
+
+  useEffect(() => {
+    const clockTimer = setInterval(() => {
+      const now = new Date();
+      setCurrentTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }));
+    }, 1000);
+    return () => clearInterval(clockTimer);
+  }, []);
+
   const misReportes = reportes.filter((r) => r.agenteId === agenteActual.id);
   const pendientesCount = misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'borrador').length;
   const aprobadosCount = misReportes.filter((r) => r.estado === 'aprobado').length;
+
+  // Compute officer first name cleanly
+  const rawName = agenteActual.nombre || 'Oficial';
+  const cleanName = rawName.replace(/^(?:Ing\.?|Lic\.?|Oficial|Guardia)\s+/i, '').trim();
+  const firstName = cleanName.split(' ')[0] || rawName;
 
   const handleManualSearch = (code?: string) => {
     const target = (code || manualCode).trim();
@@ -76,7 +95,7 @@ export default function HomeDashboard() {
 
   return (
     <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-      {/* ─── 1. ANIMATED RESORT HERO BANNER WITH CARLOS PROFILE ─── */}
+      {/* ─── 1. ANIMATED RESORT HERO BANNER WITH REAL OFFICER PROFILE ─── */}
       <View style={styles.heroBannerContainer}>
         <Animated.Image
           source={RESORT_SLIDES[bgIndex]}
@@ -94,11 +113,11 @@ export default function HomeDashboard() {
         />
 
         <View style={styles.heroBannerContent}>
-          {/* Left: Carlos Photo Avatar + Info */}
+          {/* Left: Dynamic Officer Photo Avatar + Info */}
           <View style={styles.heroLeftCol}>
             <View style={styles.heroAvatarWrap}>
               <Image
-                source={{ uri: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=200' }}
+                source={{ uri: agenteActual.avatarUrl || 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=200' }}
                 style={styles.heroAvatarImg}
               />
               <View style={styles.heroLiveDot} />
@@ -106,18 +125,18 @@ export default function HomeDashboard() {
 
             <View style={styles.heroTextCol}>
               <ThemedText style={styles.heroWelcomeTitle}>
-                Bienvenido, Carlos
+                Bienvenido, {firstName}
               </ThemedText>
               <ThemedText style={styles.heroWelcomeSubtitle} numberOfLines={1}>
-                Turno Matutino &bull; Caseta Acceso Principal (Sector 4)
+                {agenteActual.turno} &bull; {agenteActual.zona}
               </ThemedText>
             </View>
           </View>
 
-          {/* Right: Live Clock Pill */}
+          {/* Right: Real-time Live Clock Pill */}
           <View style={styles.liveClockBadge}>
             <View style={styles.liveGreenDot} />
-            <ThemedText style={styles.liveClockText}>08:45 AM &bull; En Servicio</ThemedText>
+            <ThemedText style={styles.liveClockText}>{currentTime} &bull; En Servicio</ThemedText>
           </View>
         </View>
       </View>

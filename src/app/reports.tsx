@@ -408,7 +408,7 @@ export default function ReportsScreen() {
                   <View>
                     <ThemedText style={styles.modalTitle}>Expediente {selectedReport.folio}</ThemedText>
                     <ThemedText style={styles.modalSubTitle}>
-                      Registrado por Oficial Carlos Ramírez
+                      Registrado por {agenteActual?.nombre || 'Oficial en Servicio'}
                     </ThemedText>
                   </View>
                 </View>

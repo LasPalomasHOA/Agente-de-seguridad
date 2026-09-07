@@ -42,6 +42,8 @@ async function main() {
       }
     );
 
+
+
     serverProcess.on('error', (err) => {
       console.warn(`\x1b[33m[Backend API Error]\x1b[0m No se pudo iniciar el servidor:`, err.message);
     });
@@ -62,12 +64,12 @@ async function main() {
     if (serverProcess) {
       try {
         serverProcess.kill();
-      } catch {}
+      } catch { }
     }
     if (expoProcess) {
       try {
         expoProcess.kill();
-      } catch {}
+      } catch { }
     }
     process.exit();
   };
@@ -80,7 +82,7 @@ async function main() {
     if (serverProcess) {
       try {
         serverProcess.kill();
-      } catch {}
+      } catch { }
     }
     process.exit(code || 0);
   });
