@@ -576,10 +576,14 @@ export const ApiService = {
         };
       }
 
-      // Sanciones del vehículo (usando caché)
-      const todasSanciones = await this.getSanciones();
-      const sancionesActivas = todasSanciones
-        .filter((s: any) => s.id_vehiculo === vehiculoRow.id_vehiculo && (s.estatus === 'ACTIVA' || s.estatus === 'activa'))
+      // Sanciones e infracciones históricas del vehículo consultadas concurrentemente (elimina waterfall)
+      const [todasSanciones, reportesVehiculo] = await Promise.all([
+        this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
+        this.getReportes({ idVehiculo: vehiculoRow.id_vehiculo, limit: 100 }),
+      ]);
+
+      const sancionesActivas = (todasSanciones || [])
+        .filter((s: any) => (s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo'))
         .map((s: any) => ({
           id_sancion: s.id_sancion,
           id_reporte: s.id_reporte || 1,
@@ -596,9 +600,7 @@ export const ApiService = {
           updated_at: s.updated_at || new Date().toISOString(),
         }));
 
-      // Infracciones históricas (usando caché)
-      const reportesVehiculo = await this.getReportes();
-      const totalInfracciones = reportesVehiculo.filter((r: any) => r.id_vehiculo === vehiculoRow.id_vehiculo).length;
+      const totalInfracciones = (reportesVehiculo || []).length;
 
       const result: CorbatinLookupResult = {
         corbatin: corbatinRow,
@@ -732,6 +734,7 @@ export const ApiService = {
       // Invalidar cachés relacionadas para que la próxima lectura traiga el nuevo reporte
       apiCache.invalidate('reportes');
       apiCache.invalidate('lookup_');
+      apiCache.invalidate('sanciones');
 
       if (res && res.id_reporte) {
         return { idReporte: res.id_reporte };
@@ -746,8 +749,9 @@ export const ApiService = {
   /**
    * Obtiene la lista de reportes emitidos (con soporte para filtros y caché de corta duración)
    */
-  async getReportes(options?: { idUsuario?: number; limit?: number; forceRefresh?: boolean } | number): Promise<any[]> {
+  async getReportes(options?: { idUsuario?: number; idVehiculo?: number; limit?: number; forceRefresh?: boolean } | number): Promise<any[]> {
     let idUsuario: number | undefined;
+    let idVehiculo: number | undefined;
     let limit: number | undefined;
     let forceRefresh: boolean = false;
 
@@ -755,11 +759,12 @@ export const ApiService = {
       idUsuario = options;
     } else if (typeof options === 'object' && options !== null) {
       idUsuario = options.idUsuario;
+      idVehiculo = options.idVehiculo;
       limit = options.limit;
       forceRefresh = options.forceRefresh || false;
     }
 
-    const cacheKey = `reportes_list_${idUsuario || 'all'}_${limit || 'default'}`;
+    const cacheKey = `reportes_list_${idUsuario || 'all'}_${idVehiculo || 'all'}_${limit || 'default'}`;
     if (!forceRefresh) {
       const cached = apiCache.get<any[]>(cacheKey, TTL_REPORTES);
       if (cached) return cached;
@@ -768,14 +773,18 @@ export const ApiService = {
     try {
       const queryParams: string[] = [];
       if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
+      if (idVehiculo) queryParams.push(`id_vehiculo=${idVehiculo}`);
       if (limit) queryParams.push(`limit=${limit}`);
       const queryString = queryParams.length > 0 ? `?${queryParams.join('&')}` : '';
 
       const data = await fetchJson(`/reportes${queryString}`);
       if (Array.isArray(data)) {
         let filtered = data;
-        if (idUsuario) {
-          filtered = data.filter((r: any) => r.id_usuario === idUsuario);
+        if (idUsuario && !queryString.includes('id_usuario')) {
+          filtered = filtered.filter((r: any) => r.id_usuario === idUsuario);
+        }
+        if (idVehiculo && !queryString.includes('id_vehiculo')) {
+          filtered = filtered.filter((r: any) => r.id_vehiculo === idVehiculo);
         }
         apiCache.set(cacheKey, filtered);
         return filtered;
@@ -890,18 +899,35 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene sanciones (con caché en memoria)
+   * Obtiene sanciones (con soporte para filtrado por vehículo y caché en memoria)
    */
-  async getSanciones(): Promise<any[]> {
-    const cacheKey = 'sanciones_list';
-    const cached = apiCache.get<any[]>(cacheKey, TTL_VEHICLES_CORBATINES);
-    if (cached) return cached;
+  async getSanciones(options?: { idVehiculo?: number; forceRefresh?: boolean } | number): Promise<any[]> {
+    let idVehiculo: number | undefined;
+    let forceRefresh: boolean = false;
+
+    if (typeof options === 'number') {
+      idVehiculo = options;
+    } else if (typeof options === 'object' && options !== null) {
+      idVehiculo = options.idVehiculo;
+      forceRefresh = options.forceRefresh || false;
+    }
+
+    const cacheKey = `sanciones_list_${idVehiculo || 'all'}`;
+    if (!forceRefresh) {
+      const cached = apiCache.get<any[]>(cacheKey, TTL_VEHICLES_CORBATINES);
+      if (cached) return cached;
+    }
 
     try {
-      const data = await fetchJson('/sanciones');
+      const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}` : '';
+      const data = await fetchJson(`/sanciones${queryParam}`);
       if (Array.isArray(data)) {
-        apiCache.set(cacheKey, data);
-        return data;
+        let filtered = data;
+        if (idVehiculo && !queryParam) {
+          filtered = data.filter((s: any) => s.id_vehiculo === idVehiculo);
+        }
+        apiCache.set(cacheKey, filtered);
+        return filtered;
       }
       return [];
     } catch {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   StyleSheet,
@@ -25,6 +25,29 @@ const RESORT_SLIDES = [
   require('@/assets/images/resort-2.jpg'),
   require('@/assets/images/resort-3.jpg'),
 ];
+
+// Isolated memoized clock to prevent re-rendering the entire dashboard 60 times/min
+const LiveClock = React.memo(() => {
+  const [currentTime, setCurrentTime] = useState(() => {
+    const now = new Date();
+    return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+  });
+
+  useEffect(() => {
+    const clockTimer = setInterval(() => {
+      const now = new Date();
+      setCurrentTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }));
+    }, 1000);
+    return () => clearInterval(clockTimer);
+  }, []);
+
+  return (
+    <View style={styles.liveClockBadge}>
+      <View style={styles.liveGreenDot} />
+      <ThemedText style={styles.liveClockText}>{currentTime} &bull; En Servicio</ThemedText>
+    </View>
+  );
+});
 
 export default function HomeDashboard() {
   const { agenteActual, reportes } = useMobile();
@@ -60,28 +83,30 @@ export default function HomeDashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  // Live real-time clock
-  const [currentTime, setCurrentTime] = useState(() => {
-    const now = new Date();
-    return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-  });
-
-  useEffect(() => {
-    const clockTimer = setInterval(() => {
-      const now = new Date();
-      setCurrentTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }));
-    }, 1000);
-    return () => clearInterval(clockTimer);
-  }, []);
-
-  const misReportes = reportes.filter((r) => r.agenteId === agenteActual.id);
-  const pendientesCount = misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'borrador').length;
-  const aprobadosCount = misReportes.filter((r) => r.estado === 'aprobado').length;
+  const misReportes = useMemo(
+    () => reportes.filter((r) => r.agenteId === agenteActual.id),
+    [reportes, agenteActual.id]
+  );
+  const todayIso = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const reportesHoyCount = useMemo(
+    () => misReportes.filter((r) => (r.fecha || '').startsWith(todayIso)).length,
+    [misReportes, todayIso]
+  );
+  const pendientesCount = useMemo(
+    () => misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'borrador').length,
+    [misReportes]
+  );
+  const aprobadosCount = useMemo(
+    () => misReportes.filter((r) => r.estado === 'aprobado').length,
+    [misReportes]
+  );
 
   // Compute officer first name cleanly
-  const rawName = agenteActual.nombre || 'Oficial';
-  const cleanName = rawName.replace(/^(?:Ing\.?|Lic\.?|Oficial|Guardia)\s+/i, '').trim();
-  const firstName = cleanName.split(' ')[0] || rawName;
+  const firstName = useMemo(() => {
+    const rawName = agenteActual.nombre || 'Oficial';
+    const cleanName = rawName.replace(/^(?:Ing\.?|Lic\.?|Oficial|Guardia)\s+/i, '').trim();
+    return cleanName.split(' ')[0] || rawName;
+  }, [agenteActual.nombre]);
 
   const handleManualSearch = (code?: string) => {
     const target = (code || manualCode).trim();
@@ -134,10 +159,7 @@ export default function HomeDashboard() {
           </View>
 
           {/* Right: Real-time Live Clock Pill */}
-          <View style={styles.liveClockBadge}>
-            <View style={styles.liveGreenDot} />
-            <ThemedText style={styles.liveClockText}>{currentTime} &bull; En Servicio</ThemedText>
-          </View>
+          <LiveClock />
         </View>
       </View>
 
@@ -225,7 +247,7 @@ export default function HomeDashboard() {
                 <Ionicons name="documents" size={20} color="#2563EB" />
               </View>
               <View>
-                <ThemedText style={styles.kpiNumber}>12</ThemedText>
+                <ThemedText style={styles.kpiNumber}>{reportesHoyCount}</ThemedText>
                 <ThemedText style={styles.kpiLabel}>Reportes Hoy</ThemedText>
               </View>
             </View>
@@ -247,7 +269,7 @@ export default function HomeDashboard() {
                 <Ionicons name="shield-checkmark" size={20} color="#059669" />
               </View>
               <View>
-                <ThemedText style={styles.kpiNumber}>{aprobadosCount || 8}</ThemedText>
+                <ThemedText style={styles.kpiNumber}>{aprobadosCount}</ThemedText>
                 <ThemedText style={styles.kpiLabel}>Dictaminados HOA</ThemedText>
               </View>
             </View>

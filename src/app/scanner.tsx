@@ -53,7 +53,7 @@ export default function ScannerScreen() {
   const params = useLocalSearchParams();
   const router = useRouter();
   const theme = useTheme();
-  const { agregarReporte } = useMobile();
+  const { agregarReporte, catalogoInfracciones } = useMobile();
 
   // Navigation / Mode states
   const [mode, setMode] = useState<Mode>('camera');
@@ -63,7 +63,6 @@ export default function ScannerScreen() {
   const [selectedEmpresa, setSelectedEmpresa] = useState<EmpresaRow | null>(null);
   const [selectedConductor, setSelectedConductor] = useState<TrabajadorRow | null>(null);
   const [sancionesActivas, setSancionesActivas] = useState<SancionDbRow[]>([]);
-  const [catalogoInfracciones, setCatalogoInfracciones] = useState<CatalogoInfraccionRow[]>([]);
 
   // Camera & Permissions states
   const [permission, requestPermission] = useCameraPermissions();
@@ -79,7 +78,7 @@ export default function ScannerScreen() {
   // Wizard state (3 steps)
   const [step, setStep] = useState<WizardStep>(1);
   const [selectedCategory, setSelectedCategory] = useState<string>('seguridad');
-  const [selectedInfraccion, setSelectedInfraccion] = useState<CatalogoInfraccionRow | null>(null);
+  const [selectedInfraccion, setSelectedInfraccion] = useState<CatalogoInfraccionRow | null>(() => catalogoInfracciones[0] || null);
   const [lugar, setLugar] = useState('Estacionamiento Norte');
   const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
   const [hora, setHora] = useState(new Date().toTimeString().split(' ')[0].substring(0, 5));
@@ -94,15 +93,12 @@ export default function ScannerScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [generatedFolio, setGeneratedFolio] = useState('');
 
-  // Fetch catalog on mount
+  // Sync default infraccion when catalog loads
   useEffect(() => {
-    SupabaseService.getCatalogoInfracciones().then((infs) => {
-      setCatalogoInfracciones(infs);
-      if (infs && infs.length > 0) {
-        setSelectedInfraccion(infs[0]);
-      }
-    });
-  }, []);
+    if (catalogoInfracciones && catalogoInfracciones.length > 0 && !selectedInfraccion) {
+      setSelectedInfraccion(catalogoInfracciones[0]);
+    }
+  }, [catalogoInfracciones, selectedInfraccion]);
 
   const lookupInProgress = React.useRef(false);
 
@@ -949,8 +945,11 @@ export default function ScannerScreen() {
                   await agregarReporte(
                     {
                       vehiculoId: String(selectedVehicle.id_vehiculo),
-                      corbatinNumero: String(selectedCorbatin?.numero || '0'),
+                      corbatinNumero: selectedCorbatin?.numero ? `C-2026-${String(selectedCorbatin.numero).padStart(3, '0')}` : 'S/C',
                       infraccionCodigo: selectedInfraccion.codigo,
+                      idVehiculo: Number(selectedVehicle.id_vehiculo),
+                      idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
+                      idInfraccion: Number(selectedInfraccion.id_infraccion) || 1,
                       lugar: lugar,
                       descripcion: descripcion || 'Borrador guardado.',
                       observaciones: 'Guardado por el oficial.',

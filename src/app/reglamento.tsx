@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   View,
   StyleSheet,
@@ -12,48 +12,35 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { ThemedText } from '@/components/themed-text';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
-import { SupabaseService } from '../services/supabaseService';
-import { CatalogoInfraccionRow, ReglamentoRow } from '../types/database';
+import { useMobile } from '../context/MobileContext';
 
 export default function ReglamentoScreen() {
+  const { catalogoInfracciones, reglamentos, cargarCatalogo } = useMobile();
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('todos');
-  const [infracciones, setInfracciones] = useState<CatalogoInfraccionRow[]>([]);
-  const [reglamentos, setReglamentos] = useState<ReglamentoRow[]>([]);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const [infs, regs] = await Promise.all([
-          SupabaseService.getCatalogoInfracciones(),
-          SupabaseService.getReglamentos(),
-        ]);
-        setInfracciones(infs);
-        setReglamentos(regs);
-      } catch (e) {
-        console.warn('Error fetching reglamento data:', e);
-      } finally {
-        setLoading(false);
-      }
-    };
+  const infracciones = catalogoInfracciones;
+  const loading = infracciones.length === 0;
 
-    fetchData();
-  }, []);
+  const categorias = useMemo(
+    () => Array.from(new Set(infracciones.map((i) => i.categoria))).filter(Boolean),
+    [infracciones]
+  );
 
-  const categorias = Array.from(new Set(infracciones.map((i) => i.categoria))).filter(Boolean);
+  const filteredInfracciones = useMemo(() => {
+    const cleanSearch = search.toLowerCase().trim();
+    return infracciones.filter((inf) => {
+      const matchesSearch =
+        !cleanSearch ||
+        (inf.codigo || '').toLowerCase().includes(cleanSearch) ||
+        (inf.nombre || '').toLowerCase().includes(cleanSearch) ||
+        (inf.descripcion || '').toLowerCase().includes(cleanSearch) ||
+        (inf.categoria || '').toLowerCase().includes(cleanSearch);
 
-  const filteredInfracciones = infracciones.filter((inf) => {
-    const matchesSearch =
-      (inf.codigo || '').toLowerCase().includes(search.toLowerCase()) ||
-      (inf.nombre || '').toLowerCase().includes(search.toLowerCase()) ||
-      (inf.descripcion || '').toLowerCase().includes(search.toLowerCase()) ||
-      (inf.categoria || '').toLowerCase().includes(search.toLowerCase());
-
-    if (activeCategory === 'todos') return matchesSearch;
-    return matchesSearch && inf.categoria === activeCategory;
-  });
+      if (activeCategory === 'todos') return matchesSearch;
+      return matchesSearch && inf.categoria === activeCategory;
+    });
+  }, [infracciones, search, activeCategory]);
 
   return (
     <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>

@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { Platform } from 'react-native';
 import { Agente } from '../types/agente';
 import { ReporteInfraccion } from '../types/reporte';
+import { CatalogoInfraccionRow, ReglamentoRow } from '../types/database';
 import { SupabaseService } from '../services/supabaseService';
 
 const safeStorage = {
@@ -77,11 +78,14 @@ interface MobileContextType {
   isAuthenticated: boolean;
   agenteActual: Agente;
   reportes: ReporteInfraccion[];
+  catalogoInfracciones: CatalogoInfraccionRow[];
+  reglamentos: ReglamentoRow[];
   themeMode: 'light' | 'dark';
   toggleTheme: () => void;
   login: (usuario: string, contrasena: string) => Promise<boolean>;
   logout: () => void;
-  cargarReportes: (forceRefresh?: boolean) => Promise<void>;
+  cargarReportes: (forceRefresh?: boolean, idUsuario?: number) => Promise<void>;
+  cargarCatalogo: (forceRefresh?: boolean) => Promise<void>;
   agregarReporte: (
     nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
       idVehiculo?: number;
@@ -100,11 +104,30 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [agenteActual, setAgenteActual] = useState<Agente>(DEFAULT_AGENTE);
   const [reportes, setReportes] = useState<ReporteInfraccion[]>([]);
+  const [catalogoInfracciones, setCatalogoInfracciones] = useState<CatalogoInfraccionRow[]>([]);
+  const [reglamentos, setReglamentos] = useState<ReglamentoRow[]>([]);
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>('light');
 
-  const cargarReportes = async (forceRefresh = false) => {
+  const cargarCatalogo = useCallback(async (forceRefresh = false) => {
     try {
-      const dbReportes = await SupabaseService.getReportes({ limit: 50, forceRefresh });
+      const [infs, regs] = await Promise.all([
+        SupabaseService.getCatalogoInfracciones(),
+        SupabaseService.getReglamentos(),
+      ]);
+      if (infs && infs.length > 0) setCatalogoInfracciones(infs);
+      if (regs && regs.length > 0) setReglamentos(regs);
+    } catch (err) {
+      console.warn('Error cargando catálogo en contexto:', err);
+    }
+  }, []);
+
+  const cargarReportes = useCallback(async (forceRefresh = false, idUsuario?: number) => {
+    try {
+      const dbReportes = await SupabaseService.getReportes({
+        idUsuario: idUsuario || undefined,
+        limit: 100,
+        forceRefresh,
+      });
       if (dbReportes && dbReportes.length > 0) {
         const mapped: ReporteInfraccion[] = dbReportes.map((r: any) => {
           const statusLower = (r.estatus_revision || '').toLowerCase();
@@ -112,6 +135,8 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             ? 'aprobado'
             : statusLower === 'rechazado' || statusLower === 'rechazada'
             ? 'rechazado'
+            : statusLower === 'borrador'
+            ? 'borrador'
             : 'pendiente';
 
           return {
@@ -143,7 +168,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     } catch (err) {
       console.warn('Error cargando reportes:', err);
     }
-  };
+  }, []);
 
   useEffect(() => {
     const syncUserWithDb = async () => {
@@ -212,20 +237,23 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     syncUserWithDb();
     cargarReportes();
-  }, []);
+    cargarCatalogo();
+  }, [cargarReportes, cargarCatalogo]);
 
-  const saveReportes = (newReportes: ReporteInfraccion[]) => {
+  const saveReportes = useCallback((newReportes: ReporteInfraccion[]) => {
     setReportes(newReportes);
     safeStorage.setItem('hoa_mobile_reportes', JSON.stringify(newReportes));
-  };
+  }, []);
 
-  const toggleTheme = () => {
-    const nextTheme = themeMode === 'light' ? 'dark' : 'light';
-    setThemeMode(nextTheme);
-    safeStorage.setItem('hoa_mobile_theme', nextTheme);
-  };
+  const toggleTheme = useCallback(() => {
+    setThemeMode((prev) => {
+      const nextTheme = prev === 'light' ? 'dark' : 'light';
+      safeStorage.setItem('hoa_mobile_theme', nextTheme);
+      return nextTheme;
+    });
+  }, []);
 
-  const login = async (usuario: string, contrasena: string): Promise<boolean> => {
+  const login = useCallback(async (usuario: string, contrasena: string): Promise<boolean> => {
     const dbUser = await SupabaseService.login(usuario, contrasena);
     if (dbUser) {
       const role = dbUser.rolNombre || dbUser.roles?.nombre || dbUser.rol || 'Agente de Seguridad';
@@ -246,17 +274,18 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       safeStorage.setItem('hoa_mobile_auth', 'true');
       safeStorage.setItem('hoa_mobile_agente', JSON.stringify(agente));
       cargarReportes();
+      cargarCatalogo();
       return true;
     }
     return false;
-  };
+  }, [cargarReportes, cargarCatalogo]);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     setIsAuthenticated(false);
     safeStorage.removeItem('hoa_mobile_auth');
-  };
+  }, []);
 
-  const agregarReporte = async (
+  const agregarReporte = useCallback(async (
     nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
       idVehiculo?: number;
       idCorbatin?: number | null;
@@ -287,7 +316,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       let infIdNum = nuevo.idInfraccion;
       if (!infIdNum) {
-        const catalogo = await SupabaseService.getCatalogoInfracciones();
+        const catalogo = catalogoInfracciones.length > 0 ? catalogoInfracciones : await SupabaseService.getCatalogoInfracciones();
         const found = catalogo.find(
           (c) => (c.codigo || '').toLowerCase() === (nuevo.infraccionCodigo || '').toLowerCase()
         );
@@ -335,32 +364,58 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       ],
     };
 
-    const updated = [completo, ...reportes];
-    saveReportes(updated);
+    setReportes((prev) => {
+      const updated = [completo, ...prev];
+      safeStorage.setItem('hoa_mobile_reportes', JSON.stringify(updated));
+      return updated;
+    });
 
     return completo.folio;
-  };
+  }, [agenteActual, catalogoInfracciones]);
 
-  const actualizarReporte = (reporte: ReporteInfraccion) => {
-    const updated = reportes.map((r) => (r.id === reporte.id ? reporte : r));
-    saveReportes(updated);
-  };
+  const actualizarReporte = useCallback((reporte: ReporteInfraccion) => {
+    setReportes((prev) => {
+      const updated = prev.map((r) => (r.id === reporte.id ? reporte : r));
+      safeStorage.setItem('hoa_mobile_reportes', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
+
+  const contextValue = useMemo<MobileContextType>(
+    () => ({
+      isAuthenticated,
+      agenteActual,
+      reportes,
+      catalogoInfracciones,
+      reglamentos,
+      themeMode,
+      toggleTheme,
+      login,
+      logout,
+      cargarReportes,
+      cargarCatalogo,
+      agregarReporte,
+      actualizarReporte,
+    }),
+    [
+      isAuthenticated,
+      agenteActual,
+      reportes,
+      catalogoInfracciones,
+      reglamentos,
+      themeMode,
+      toggleTheme,
+      login,
+      logout,
+      cargarReportes,
+      cargarCatalogo,
+      agregarReporte,
+      actualizarReporte,
+    ]
+  );
 
   return (
-    <MobileContext.Provider
-      value={{
-        isAuthenticated,
-        agenteActual,
-        reportes,
-        themeMode,
-        toggleTheme,
-        login,
-        logout,
-        cargarReportes,
-        agregarReporte,
-        actualizarReporte,
-      }}
-    >
+    <MobileContext.Provider value={contextValue}>
       {children}
     </MobileContext.Provider>
   );

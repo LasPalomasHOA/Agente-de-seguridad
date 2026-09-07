@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   View,
   StyleSheet,
@@ -45,40 +45,58 @@ export default function ReportsScreen() {
   const [selectedReport, setSelectedReport] = useState<ReporteInfraccion | null>(null);
   const [zoomPhoto, setZoomPhoto] = useState<string | null>(null);
 
-  const misReportes = reportes.filter((r) => r.agenteId === agenteActual.id);
+  const misReportes = useMemo(
+    () => reportes.filter((r) => r.agenteId === agenteActual.id),
+    [reportes, agenteActual.id]
+  );
 
   // Status counts
-  const totalCount = misReportes.length;
-  const pendientesCount = misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length;
-  const aprobadosCount = misReportes.filter((r) => r.estado === 'aprobado').length;
-  const rechazadosCount = misReportes.filter((r) => r.estado === 'rechazado').length;
+  const totalCount = useMemo(() => misReportes.length, [misReportes]);
+  const pendientesCount = useMemo(
+    () => misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length,
+    [misReportes]
+  );
+  const aprobadosCount = useMemo(
+    () => misReportes.filter((r) => r.estado === 'aprobado').length,
+    [misReportes]
+  );
+  const rechazadosCount = useMemo(
+    () => misReportes.filter((r) => r.estado === 'rechazado').length,
+    [misReportes]
+  );
 
-  const filtered = misReportes.filter((rep) => {
-    const matchesSearch =
-      rep.folio.toLowerCase().includes(searchFolio.toLowerCase()) ||
-      rep.infraccionCodigo.toLowerCase().includes(searchFolio.toLowerCase()) ||
-      rep.lugar.toLowerCase().includes(searchFolio.toLowerCase()) ||
-      rep.descripcion.toLowerCase().includes(searchFolio.toLowerCase()) ||
-      rep.corbatinNumero.toLowerCase().includes(searchFolio.toLowerCase());
+  const filtered = useMemo(() => {
+    const cleanSearch = searchFolio.toLowerCase().trim();
+    const cleanDate = dateFilter.trim();
 
-    if (dateFilter.trim()) {
-      if (!rep.fecha.includes(dateFilter.trim())) return false;
-    }
+    return misReportes.filter((rep) => {
+      const matchesSearch =
+        !cleanSearch ||
+        rep.folio.toLowerCase().includes(cleanSearch) ||
+        rep.infraccionCodigo.toLowerCase().includes(cleanSearch) ||
+        rep.lugar.toLowerCase().includes(cleanSearch) ||
+        rep.descripcion.toLowerCase().includes(cleanSearch) ||
+        rep.corbatinNumero.toLowerCase().includes(cleanSearch);
 
-    if (selectedStatus === 'pendiente') {
-      return matchesSearch && (rep.estado === 'pendiente' || rep.estado === 'informacion_solicitada');
-    }
-    if (selectedStatus === 'aprobado') {
-      return matchesSearch && rep.estado === 'aprobado';
-    }
-    if (selectedStatus === 'rechazado') {
-      return matchesSearch && rep.estado === 'rechazado';
-    }
-    if (selectedStatus === 'borrador') {
-      return matchesSearch && rep.estado === 'borrador';
-    }
-    return matchesSearch;
-  });
+      if (cleanDate && !rep.fecha.includes(cleanDate)) {
+        return false;
+      }
+
+      if (selectedStatus === 'pendiente') {
+        return matchesSearch && (rep.estado === 'pendiente' || rep.estado === 'informacion_solicitada');
+      }
+      if (selectedStatus === 'aprobado') {
+        return matchesSearch && rep.estado === 'aprobado';
+      }
+      if (selectedStatus === 'rechazado') {
+        return matchesSearch && rep.estado === 'rechazado';
+      }
+      if (selectedStatus === 'borrador') {
+        return matchesSearch && rep.estado === 'borrador';
+      }
+      return matchesSearch;
+    });
+  }, [misReportes, searchFolio, dateFilter, selectedStatus]);
 
   // Dynamic responsive card style based on screen width
   const getCardStyle = (): ViewStyle => {

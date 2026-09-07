@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import { View, StyleSheet, ScrollView, Pressable, Modal, Image, useWindowDimensions } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -6,27 +6,22 @@ import { useMobile } from '../context/MobileContext';
 import { useTheme } from '@/hooks/use-theme';
 import { Spacing } from '@/constants/theme';
 import { Ionicons } from '@expo/vector-icons';
-import { SupabaseService } from '../services/supabaseService';
 import { CatalogoInfraccionRow } from '../types/database';
 
 export default function ProfileScreen() {
-  const { agenteActual, reportes, logout, themeMode, toggleTheme } = useMobile();
+  const { agenteActual, reportes, catalogoInfracciones, logout, themeMode, toggleTheme } = useMobile();
   const theme = useTheme();
   const { width } = useWindowDimensions();
 
   // Modal references
   const [helpVisible, setHelpVisible] = useState(false);
   const [rulesVisible, setRulesVisible] = useState(false);
-  const [infracciones, setInfracciones] = useState<CatalogoInfraccionRow[]>([]);
-
-  useEffect(() => {
-    SupabaseService.getCatalogoInfracciones().then(setInfracciones);
-  }, []);
+  const infracciones = catalogoInfracciones;
 
   // Stats calculation
-  const misReportes = (reportes || []).filter((r: any) => r.agenteId === agenteActual?.id);
-  const pendientes = misReportes.filter((r: any) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length;
-  const aprobados = misReportes.filter((r: any) => r.estado === 'aprobado').length;
+  const misReportes = useMemo(() => (reportes || []).filter((r: any) => r.agenteId === agenteActual?.id), [reportes, agenteActual?.id]);
+  const pendientes = useMemo(() => misReportes.filter((r: any) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length, [misReportes]);
+  const aprobados = useMemo(() => misReportes.filter((r: any) => r.estado === 'aprobado').length, [misReportes]);
 
   const isTablet = width >= 600;
 
