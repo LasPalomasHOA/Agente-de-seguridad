@@ -81,7 +81,7 @@ interface MobileContextType {
   toggleTheme: () => void;
   login: (usuario: string, contrasena: string) => Promise<boolean>;
   logout: () => void;
-  cargarReportes: () => Promise<void>;
+  cargarReportes: (forceRefresh?: boolean) => Promise<void>;
   agregarReporte: (
     nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
       idVehiculo?: number;
@@ -102,9 +102,9 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [reportes, setReportes] = useState<ReporteInfraccion[]>([]);
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>('light');
 
-  const cargarReportes = async () => {
+  const cargarReportes = async (forceRefresh = false) => {
     try {
-      const dbReportes = await SupabaseService.getReportes();
+      const dbReportes = await SupabaseService.getReportes({ limit: 50, forceRefresh });
       if (dbReportes && dbReportes.length > 0) {
         const mapped: ReporteInfraccion[] = dbReportes.map((r: any) => {
           const statusLower = (r.estatus_revision || '').toLowerCase();
@@ -163,31 +163,29 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         if (localAgente) {
           try {
             parsed = JSON.parse(localAgente);
+            if (parsed && parsed.id) {
+              setAgenteActual({
+                ...parsed,
+                turno: computeTurno(),
+                zona: parsed.zona || computeZona(parsed.rol),
+                avatarUrl: getAvatarUrl(parsed.nombre, parsed.foto_url || parsed.avatarUrl || parsed.avatar),
+              });
+              // Si ya tenemos el usuario parseado en almacenamiento seguro, evitamos consultar la lista completa
+              return;
+            }
           } catch {}
         }
 
-        // Sincronizar usuario activo directamente con la base de datos PostgreSQL
+        // Sincronizar usuario activo usando caché si no hay datos locales
         const users = await SupabaseService.getUsuarios();
         if (users && users.length > 0) {
-          let found: any = null;
-          if (parsed) {
-            found = users.find(
-              (u: any) =>
-                String(u.id_usuario || u.id) === String(parsed.id) ||
-                (u.correo && parsed.correo && u.correo.toLowerCase() === parsed.correo.toLowerCase()) ||
-                (u.nombre && parsed.nombre && u.nombre.toLowerCase() === parsed.nombre.toLowerCase())
-            );
-          }
-          if (!found) {
-            // Usuario predeterminado en servicio (Kenet / Carlos Méndez / Caseta)
-            found = users.find(
-              (u: any) =>
-                u.nombre?.toLowerCase().includes('kenet') ||
-                (u.rolNombre || u.rol || '').toLowerCase().includes('agente') ||
-                (u.rolNombre || u.rol || '').toLowerCase().includes('caseta') ||
-                u.nombre?.toLowerCase().includes('carlos')
-            ) || users[0];
-          }
+          const found = users.find(
+            (u: any) =>
+              u.nombre?.toLowerCase().includes('kenet') ||
+              (u.rolNombre || u.rol || '').toLowerCase().includes('agente') ||
+              (u.rolNombre || u.rol || '').toLowerCase().includes('caseta') ||
+              u.nombre?.toLowerCase().includes('carlos')
+          ) || users[0];
 
           if (found) {
             const role = found.rolNombre || found.rol || 'Agente de Seguridad';
@@ -206,13 +204,6 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             setAgenteActual(syncedAgente);
             safeStorage.setItem('hoa_mobile_agente', JSON.stringify(syncedAgente));
           }
-        } else if (parsed) {
-          setAgenteActual({
-            ...parsed,
-            turno: computeTurno(),
-            zona: parsed.zona || computeZona(parsed.rol),
-            avatarUrl: getAvatarUrl(parsed.nombre, parsed.foto_url || parsed.avatarUrl || parsed.avatar),
-          });
         }
       } catch (e) {
         console.warn('Error syncing user with DB:', e);

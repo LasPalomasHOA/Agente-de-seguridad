@@ -104,16 +104,18 @@ export default function ScannerScreen() {
     });
   }, []);
 
+  const lookupInProgress = React.useRef(false);
+
   const executeLookup = async (code: string) => {
     const cleanCode = (code || '').trim();
     if (!cleanCode) return;
+    if (lookupInProgress.current) return;
+    lookupInProgress.current = true;
+
     setLoadingText('Consultando base de datos HOA...');
     setMode('loading');
     try {
-      let res = await SupabaseService.buscarCorbatin(cleanCode);
-      if (!res) {
-        res = await SupabaseService.buscarVehiculoPorPlaca(cleanCode);
-      }
+      const res = await SupabaseService.buscarCorbatin(cleanCode);
       if (res && res.vehiculo) {
         setSelectedVehicle(res.vehiculo);
         setSelectedCorbatin(res.corbatin);
@@ -130,6 +132,8 @@ export default function ScannerScreen() {
       alert('Error de conexión con la base de datos.');
       setMode('camera');
       setScanned(false);
+    } finally {
+      lookupInProgress.current = false;
     }
   };
 
@@ -149,11 +153,12 @@ export default function ScannerScreen() {
   useEffect(() => {
     if (mode === 'camera') {
       setScanned(false);
+      lookupInProgress.current = false;
     }
   }, [mode]);
 
   const handleBarcodeScanned = ({ data }: { data: string; type?: string }) => {
-    if (scanned || !data || mode !== 'camera') return;
+    if (scanned || lookupInProgress.current || !data || mode !== 'camera') return;
     setScanned(true);
     executeLookup(data);
   };
@@ -182,17 +187,9 @@ export default function ScannerScreen() {
 
   // Actions
   const handleTriggerScanSimulate = async () => {
-    try {
-      const corbatines = await SupabaseService.getCorbatines();
-      if (corbatines && corbatines.length > 0) {
-        const rand = corbatines[Math.floor(Math.random() * corbatines.length)];
-        executeLookup(String(rand.numero || rand.qr_token));
-      } else {
-        executeLookup('1');
-      }
-    } catch {
-      executeLookup('1');
-    }
+    const simulationPool = ['70', '101', 'SON-7080-A', 'LP-HOA|CORB:105|PLACAS:X|VIG:2026-2027'];
+    const randCode = simulationPool[Math.floor(Math.random() * simulationPool.length)];
+    executeLookup(randCode);
   };
 
   const handleManualSearch = (codeToSearch?: string) => {

@@ -10,6 +10,7 @@ import {
   useWindowDimensions,
   ViewStyle,
   DimensionValue,
+  RefreshControl,
 } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { useRouter } from 'expo-router';
@@ -20,13 +21,22 @@ import { ReporteInfraccion } from '../types/reporte';
 
 export default function ReportsScreen() {
   const router = useRouter();
-  const { reportes, agenteActual } = useMobile();
+  const { reportes, agenteActual, cargarReportes } = useMobile();
   const { width } = useWindowDimensions();
 
   // Responsive Breakpoints
   const isMobile = width < 650;
   const isTablet = width >= 650 && width < 1050;
   const isDesktop = width >= 1050 && width < 1450;
+
+  // Refreshing state
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await cargarReportes(true);
+    setRefreshing(false);
+  };
 
   // Filters state
   const [searchFolio, setSearchFolio] = useState('');
@@ -86,7 +96,18 @@ export default function ReportsScreen() {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>
+    <ScrollView
+      contentContainerStyle={styles.scrollContainer}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          colors={['#0D6E5F']}
+          tintColor="#0D6E5F"
+        />
+      }
+    >
       {/* ─── ANIMATED RESORT HEADER ─── */}
       <ResortHeader
         title="Mis Reportes e Infracciones"
