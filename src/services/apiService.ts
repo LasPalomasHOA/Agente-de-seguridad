@@ -1,4 +1,4 @@
-// Servicio de Comunicación con la API REST (PostgreSQL vía Backend Express)
+// Servicio de Comunicación con la API REST (PostgreSQL vía Backend Express y Supabase Egress-Optimized)
 import {
   CorbatinRow,
   VehiculoRow,
@@ -15,6 +15,7 @@ import {
 
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
+import { supabase, isSupabaseConfigured, PROJECTIONS, getCountOptimized } from '../lib/supabase';
 
 const resolveApiBaseUrl = (): string => {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
@@ -24,7 +25,10 @@ const resolveApiBaseUrl = (): string => {
 
   // Si estamos en un dispositivo móvil y la URL apunta a localhost o 127.0.0.1
   if (!envUrl || envUrl.includes('localhost') || envUrl.includes('127.0.0.1')) {
-    const hostUri = Constants.expoConfig?.hostUri || (Constants as any).manifest2?.extra?.expoGo?.debuggerHost || (Constants as any).manifest?.debuggerHost;
+    const hostUri =
+      Constants.expoConfig?.hostUri ||
+      (Constants as any).manifest2?.extra?.expoGo?.debuggerHost ||
+      (Constants as any).manifest?.debuggerHost;
     if (hostUri) {
       const hostIp = hostUri.split(':')[0];
       if (hostIp) {
@@ -67,60 +71,158 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
       try {
         errorJson = JSON.parse(errorText);
       } catch {}
-      throw new Error(errorJson?.error || errorJson?.message || `HTTP ${res.status}: ${errorText || res.statusText}`);
+      throw new Error(
+        errorJson?.error || errorJson?.message || `HTTP ${res.status}: ${errorText || res.statusText}`
+      );
     }
 
     return await res.json();
   } catch (err: any) {
-    console.warn(`[ApiService] Error en llamada a ${url}:`, err.message);
+    // Reducir ruido de logs en consola cuando es fallback esperado
+    if (!err.message?.includes('Failed to fetch') && !err.message?.includes('Network request failed')) {
+      console.warn(`[ApiService] Solicitud a ${url}:`, err.message);
+    }
     throw err;
   }
 };
 
-// Cache en memoria con TTL (Time-To-Live) para evitar descargas continuas de tablas
+// Almacenamiento seguro y persistente para caché entre sesiones y recargas
+const memoryStorageMap = new Map<string, string>();
+
+const safeStorage = {
+  getItem: (key: string): string | null => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        return window.localStorage.getItem(key);
+      }
+    } catch {}
+    return memoryStorageMap.get(key) || null;
+  },
+  setItem: (key: string, value: string): void => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(key, value);
+      }
+    } catch {}
+    memoryStorageMap.set(key, value);
+  },
+  removeItem: (key: string): void => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(key);
+      }
+    } catch {}
+    memoryStorageMap.delete(key);
+  },
+};
+
+// Caché multinivel con TTL y deduplicación de peticiones concurrentes (In-Flight Request Coalescing)
 interface CacheEntry<T> {
   data: T;
   timestamp: number;
 }
 
-class SimpleMemoryCache {
-  private cache = new Map<string, CacheEntry<any>>();
+class PersistentApiCache {
+  private memoryCache = new Map<string, CacheEntry<any>>();
+  private inFlightRequests = new Map<string, Promise<any>>();
 
   get<T>(key: string, ttlMs: number): T | null {
-    const entry = this.cache.get(key);
-    if (!entry) return null;
-    if (Date.now() - entry.timestamp > ttlMs) {
-      this.cache.delete(key);
-      return null;
+    // 1. Memoria RAM (Ultra rápido 0ms)
+    const mem = this.memoryCache.get(key);
+    if (mem) {
+      if (Date.now() - mem.timestamp <= ttlMs) {
+        return mem.data as T;
+      }
+      this.memoryCache.delete(key);
     }
-    return entry.data as T;
+
+    // 2. Storage local persistente
+    try {
+      const raw = safeStorage.getItem(`hoa_cache_${key}`);
+      if (raw) {
+        const entry: CacheEntry<T> = JSON.parse(raw);
+        if (entry && typeof entry.timestamp === 'number') {
+          if (Date.now() - entry.timestamp <= ttlMs) {
+            this.memoryCache.set(key, entry);
+            return entry.data;
+          } else {
+            safeStorage.removeItem(`hoa_cache_${key}`);
+          }
+        }
+      }
+    } catch {}
+
+    return null;
   }
 
   set<T>(key: string, data: T): void {
-    this.cache.set(key, { data, timestamp: Date.now() });
+    const entry: CacheEntry<T> = { data, timestamp: Date.now() };
+    this.memoryCache.set(key, entry);
+    try {
+      safeStorage.setItem(`hoa_cache_${key}`, JSON.stringify(entry));
+    } catch {}
+  }
+
+  /**
+   * Deduplica llamadas simultáneas a la misma consulta (In-Flight Request Coalescing)
+   */
+  async getOrFetch<T>(
+    key: string,
+    ttlMs: number,
+    fetcher: () => Promise<T>,
+    forceRefresh = false
+  ): Promise<T> {
+    if (!forceRefresh) {
+      const cached = this.get<T>(key, ttlMs);
+      if (cached !== null && cached !== undefined) {
+        return cached;
+      }
+    }
+
+    if (this.inFlightRequests.has(key)) {
+      return this.inFlightRequests.get(key) as Promise<T>;
+    }
+
+    const promise = (async () => {
+      try {
+        const data = await fetcher();
+        if (data !== null && data !== undefined) {
+          this.set(key, data);
+        }
+        return data;
+      } finally {
+        this.inFlightRequests.delete(key);
+      }
+    })();
+
+    this.inFlightRequests.set(key, promise);
+    return promise;
   }
 
   invalidate(keyPrefix?: string): void {
     if (!keyPrefix) {
-      this.cache.clear();
+      this.memoryCache.clear();
       return;
     }
-    for (const key of this.cache.keys()) {
+    for (const key of this.memoryCache.keys()) {
       if (key.startsWith(keyPrefix)) {
-        this.cache.delete(key);
+        this.memoryCache.delete(key);
+        try {
+          safeStorage.removeItem(`hoa_cache_${key}`);
+        } catch {}
       }
     }
   }
 }
 
-export const apiCache = new SimpleMemoryCache();
+export const apiCache = new PersistentApiCache();
 
-// TTL Constants (en milisegundos)
-const TTL_STATIC_CATALOGS = 10 * 60 * 1000; // 10 minutos para catálogos y reglamentos
-const TTL_USERS = 5 * 60 * 1000;            // 5 minutos para usuarios
-const TTL_VEHICLES_CORBATINES = 2 * 60 * 1000; // 2 minutos para listas de vehículos/corbatines
-const TTL_LOOKUPS = 2 * 60 * 1000;          // 2 minutos para resultados de búsqueda específicos
-const TTL_REPORTES = 60 * 1000;             // 1 minuto para reportes
+// TTL Constants optimizados (en milisegundos) para reducción masiva de Egress
+const TTL_STATIC_CATALOGS = 30 * 60 * 1000;      // 30 minutos para catálogos y reglamentos
+const TTL_USERS = 15 * 60 * 1000;                 // 15 minutos para usuarios
+const TTL_VEHICLES_CORBATINES = 5 * 60 * 1000;    // 5 minutos para listas acotadas
+const TTL_LOOKUPS = 5 * 60 * 1000;               // 5 minutos para resultados de búsqueda específicos
+const TTL_REPORTES = 2 * 60 * 1000;              // 2 minutos para reportes del oficial
 
 export const ApiService = {
   /**
@@ -135,11 +237,12 @@ export const ApiService = {
   },
 
   /**
-   * Autentica al agente con correo/usuario y contraseña
+   * Autentica al agente con correo/usuario y contraseña con el servidor Express/PostgreSQL
    */
   async login(usuarioOCorreo: string, contrasena: string): Promise<any | null> {
     try {
       const cleanUser = usuarioOCorreo.trim().toLowerCase();
+      if (!cleanUser || !contrasena) return null;
 
       // 1. Intentar login directo con la API
       try {
@@ -151,11 +254,16 @@ export const ApiService = {
           }),
         });
 
-        const userData = res?.usuario || res;
+        const userData = res?.usuario || res?.user || res;
         if (userData && (userData.id_usuario || userData.id)) {
           const id = userData.id_usuario || userData.id;
           const roleName = userData.rolNombre || userData.rol?.nombre || userData.rol || 'Agente de Seguridad';
-          const avatarUrl = userData.foto_url || userData.avatar || userData.foto || userData.imagen || 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150';
+          const avatarUrl =
+            userData.foto_url ||
+            userData.avatar ||
+            userData.foto ||
+            userData.imagen ||
+            'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150';
           return {
             id_usuario: id,
             nombre: userData.nombre,
@@ -163,99 +271,67 @@ export const ApiService = {
             avatar: avatarUrl,
             avatarUrl: avatarUrl,
             rolNombre: roleName,
-            numEmpleado: `AG-2026-${String(id).padStart(3, '0')}`,
+            numEmpleado: userData.numEmpleado || `AG-2026-${String(id).padStart(3, '0')}`,
             roles: { nombre: roleName },
             token: res.token,
           };
         }
-      } catch (loginErr) {
-        // Fallback usando caché de usuarios para no saturar con SELECT *
-        const usuarios = await this.getUsuarios();
-        let found = usuarios.find(
-          (u: any) =>
-            u.correo?.toLowerCase() === cleanUser ||
-            u.nombre?.toLowerCase() === cleanUser ||
-            u.nombre?.toLowerCase().includes(cleanUser) ||
-            u.rol?.toLowerCase() === cleanUser ||
-            u.rolNombre?.toLowerCase() === cleanUser ||
-            String(u.id_usuario || u.id) === cleanUser
-        );
-
-        // Alias comunes: agente, caseta, guardia, admin
-        if (!found && cleanUser === 'agente') {
-          found = usuarios.find(
-            (u: any) =>
-              (u.rolNombre || u.rol || '').toLowerCase().includes('agente') ||
-              (u.rolNombre || u.rol || '').toLowerCase().includes('caseta') ||
-              (u.rolNombre || u.rol || '').toLowerCase().includes('guardia') ||
-              u.correo?.toLowerCase().includes('agente')
-          );
+      } catch (loginErr: any) {
+        // Si el servidor rechazó las credenciales, no autenticar
+        const errorMsg = (loginErr?.message || '').toLowerCase();
+        if (
+          errorMsg.includes('inválid') ||
+          errorMsg.includes('inactiv') ||
+          errorMsg.includes('incorrect') ||
+          errorMsg.includes('400') ||
+          errorMsg.includes('401') ||
+          errorMsg.includes('403') ||
+          errorMsg.includes('404') ||
+          errorMsg.includes('unauthorized')
+        ) {
+          return null;
         }
 
-        if (found) {
-          const id = found.id_usuario || found.id || 1;
-          const roleName = found.rolNombre || found.rol || 'Agente de Seguridad';
-          const avatarUrl = found.foto_url || found.avatar || found.foto || found.imagen || 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150';
-          return {
-            id_usuario: id,
-            nombre: found.nombre || 'Oficial en Servicio',
-            correo: found.correo || '',
-            avatar: avatarUrl,
-            avatarUrl: avatarUrl,
-            rolNombre: roleName,
-            numEmpleado: `AG-2026-${String(id).padStart(3, '0')}`,
-            roles: { nombre: roleName },
-          };
-        }
+        // Si es un error de conectividad de red
+        console.warn('[ApiService] Error de conexión al validar usuario:', loginErr.message);
+        return null;
       }
 
-      // Fallback estático de emergencia
-      return {
-        id_usuario: 1,
-        nombre: 'Oficial de Seguridad',
-        correo: 'seguridad@laspalomas.com',
-        avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150',
-        avatarUrl: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150',
-        numEmpleado: 'AG-2026-001',
-        roles: { nombre: 'Agente de Seguridad' },
-      };
-    } catch (e) {
-      console.warn('[ApiService] Error en login:', e);
-      return {
-        id_usuario: 1,
-        nombre: 'Oficial de Seguridad',
-        correo: 'seguridad@laspalomas.com',
-        avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150',
-        avatarUrl: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150',
-        numEmpleado: 'AG-2026-001',
-        roles: { nombre: 'Agente de Seguridad' },
-      };
+      return null;
+    } catch (e: any) {
+      console.warn('[ApiService] Error en login:', e.message);
+      return null;
     }
   },
 
   /**
-   * Obtiene la lista de usuarios (con caché en memoria)
+   * Obtiene la lista de usuarios con caché persistente y proyección de campos
    */
   async getUsuarios(): Promise<any[]> {
-    const cacheKey = 'usuarios_list';
-    const cached = apiCache.get<any[]>(cacheKey, TTL_USERS);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/usuarios');
-      if (Array.isArray(data)) {
-        apiCache.set(cacheKey, data);
-        return data;
+    return apiCache.getOrFetch('usuarios_list', TTL_USERS, async () => {
+      try {
+        const data = await fetchJson('/usuarios');
+        if (Array.isArray(data)) {
+          return data;
+        }
+      } catch {
+        if (isSupabaseConfigured()) {
+          const { data } = await supabase
+            .from('usuarios')
+            .select(PROJECTIONS.USUARIOS_LIGHT)
+            .eq('activo', true)
+            .limit(50);
+          if (data && Array.isArray(data)) {
+            return data;
+          }
+        }
       }
       return [];
-    } catch {
-      return [];
-    }
+    });
   },
 
   /**
-   * Extrae candidatos de búsqueda a partir de cualquier formato ingresado o escaneado:
-   * Formatos QR soportados: "LP-HOA|CORB:105|PLACAS:X|VIG:2026-2027", JSONs, URLs, prefijos C-2026-105, números puros y placas.
+   * Extrae candidatos de búsqueda a partir de cualquier formato ingresado o escaneado
    */
   extractSearchTokens(raw: string): { numbers: number[]; tokens: string[]; plates: string[] } {
     const clean = (raw || '').trim();
@@ -283,7 +359,6 @@ export const ApiService = {
           const val = valParts.join(':').trim();
           if (val) {
             candidates.tokens.push(val);
-            // SOLO extraer corbatín para campos correspondientes a corbatín o número (nunca de vehículo)
             if (/^(?:CORB|CORBATIN|NUM|NUMERO|NO|TAG)$/i.test(key)) {
               const numVal = parseInt(val.replace(/\D/g, ''), 10);
               if (!isNaN(numVal) && numVal > 0) {
@@ -291,7 +366,12 @@ export const ApiService = {
               }
             }
             if (/^(?:PLACA|PLACAS|PLATE|PLATES)$/i.test(key)) {
-              if (val.toUpperCase() !== 'X' && val.toUpperCase() !== 'N/A' && val.toUpperCase() !== 'S/P' && val.toUpperCase() !== 'SIN') {
+              if (
+                val.toUpperCase() !== 'X' &&
+                val.toUpperCase() !== 'N/A' &&
+                val.toUpperCase() !== 'S/P' &&
+                val.toUpperCase() !== 'SIN'
+              ) {
                 candidates.plates.push(val);
                 candidates.plates.push(val.replace(/[-_ ]/g, ''));
               }
@@ -358,18 +438,18 @@ export const ApiService = {
       } catch {}
     }
 
-    // 5. Número entero directo (ej: "105", "70", "101")
+    // 5. Número entero directo
     if (/^\d+$/.test(clean)) {
       candidates.numbers.push(parseInt(clean, 10));
     }
 
-    // 6. Formatos con prefijos como C-2026-070, C-2026-70, C-070, C-70, CORB-070, LP-70
+    // 6. Formatos con prefijos
     const prefixMatch = clean.match(/^(?:C|CORB|CORBATIN|LP)[-_ ]*(?:20\d\d[-_ ]*)?0*(\d+)$/i);
     if (prefixMatch && prefixMatch[1]) {
       candidates.numbers.push(parseInt(prefixMatch[1], 10));
     }
 
-    // 7. Segmento numérico final separado por guiones
+    // 7. Segmento numérico final
     const parts = clean.split(/[-_/ ]+/).filter(Boolean);
     if (parts.length > 1) {
       const lastPart = parts[parts.length - 1];
@@ -402,14 +482,14 @@ export const ApiService = {
   },
 
   /**
-   * Busca un corbatín o placa de forma optimizada con caché y sin saturar el egress
+   * Busca un corbatín o placa de forma ultra-optimizada sin descargas masivas de tablas
    */
   async buscarCorbatin(param: string): Promise<CorbatinLookupResult | null> {
     try {
       const cleanParam = (param || '').trim();
       if (!cleanParam) return null;
 
-      // 1. Revisar si la consulta ya está en caché en memoria reciente
+      // 1. Revisar si la consulta ya está en caché reciente
       const lookupCacheKey = `lookup_${cleanParam.toLowerCase()}`;
       const cachedResult = apiCache.get<CorbatinLookupResult>(lookupCacheKey, TTL_LOOKUPS);
       if (cachedResult) {
@@ -422,21 +502,21 @@ export const ApiService = {
       let matchedCorbatin: any = null;
       let matchedVehiculo: any = null;
 
-      // 3. Intento de consulta puntual directa (Ahorro de Egress ~95%)
+      // 3. Consulta puntual directa con filtros de servidor (Ahorro de Egress >95%)
       try {
-        // 3.1 Búsqueda puntual por número de corbatín si está presente
+        // 3.1 Búsqueda puntual por número de corbatín
         if (numbers.length > 0) {
-          const directCorbRes = await fetchJson(`/corbatines?numero=${numbers[0]}`);
+          const directCorbRes = await fetchJson(`/corbatines?numero=${numbers[0]}&limit=1`);
           const corbList = Array.isArray(directCorbRes)
             ? directCorbRes
             : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
-          
+
           if (corbList.length > 0) {
             matchedCorbatin = corbList.find((c: any) => Number(c.numero) === numbers[0]) || corbList[0];
             if (matchedCorbatin?.vehiculo) {
               matchedVehiculo = matchedCorbatin.vehiculo;
             } else if (matchedCorbatin?.id_vehiculo) {
-              const directVehRes = await fetchJson(`/vehiculos?id_vehiculo=${matchedCorbatin.id_vehiculo}`).catch(() => null);
+              const directVehRes = await fetchJson(`/vehiculos?id_vehiculo=${matchedCorbatin.id_vehiculo}&limit=1`).catch(() => null);
               const vList = Array.isArray(directVehRes)
                 ? directVehRes
                 : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
@@ -445,18 +525,18 @@ export const ApiService = {
           }
         }
 
-        // 3.2 Búsqueda puntual por placas vehiculares si no se obtuvo por corbatín
+        // 3.2 Búsqueda puntual por placas vehiculares
         if (!matchedVehiculo && plates.length > 0) {
           const validPlate = plates.find((p) => p.length >= 3) || plates[0];
           if (validPlate) {
-            const directVehRes = await fetchJson(`/vehiculos?placas=${encodeURIComponent(validPlate)}`).catch(() => null);
+            const directVehRes = await fetchJson(`/vehiculos?placas=${encodeURIComponent(validPlate)}&limit=1`).catch(() => null);
             const vList = Array.isArray(directVehRes)
               ? directVehRes
               : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
-            
+
             if (vList.length > 0) {
               matchedVehiculo = vList[0];
-              const directCorbRes = await fetchJson(`/corbatines?id_vehiculo=${matchedVehiculo.id_vehiculo}`).catch(() => null);
+              const directCorbRes = await fetchJson(`/corbatines?id_vehiculo=${matchedVehiculo.id_vehiculo}&limit=1`).catch(() => null);
               const cList = Array.isArray(directCorbRes)
                 ? directCorbRes
                 : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
@@ -464,120 +544,81 @@ export const ApiService = {
             }
           }
         }
-      } catch (targetedErr) {
-        // Degradación elegante: Si el backend no tiene endpoints filtrados, pasamos al fallback sin error
+      } catch {
+        // Fallback controlado
       }
 
-      // 4. Fallback Seguro: Si la consulta puntual no trajo datos, utilizar listas cacheadas en memoria
+      // 4. Fallback Seguro sin descarga masiva de tablas (Cero Egress Masivo)
       if (!matchedCorbatin || !matchedVehiculo) {
-        const [dbCorbatines, dbVehiculos] = await Promise.all([
-          this.getCorbatines(),
-          this.getVehiculos(),
-        ]);
+        // 4.1 Búsqueda directa acotada en Supabase si está disponible (con proyección y limit=1)
+        if (isSupabaseConfigured()) {
+          try {
+            if (numbers.length > 0 && !matchedCorbatin) {
+              const { data: directCorb } = await supabase
+                .from('corbatines')
+                .select(PROJECTIONS.CORBATINES_LIGHT)
+                .eq('numero', numbers[0])
+                .limit(1);
 
-        const hasDbData = dbCorbatines && dbCorbatines.length > 0;
-        const corbatines = hasDbData ? dbCorbatines : [
-          {
-            id_corbatin: 70,
-            id_vehiculo: 70,
-            numero: 70,
-            qr_token: 'QR-CORB-070',
-            fecha_emision: new Date().toISOString(),
-            fecha_vencimiento: null,
-            estatus: 'activo' as const,
-            fecha_impresion: null,
-            motivo_cancelacion: null,
-          },
-          {
-            id_corbatin: 101,
-            id_vehiculo: 1,
-            numero: 101,
-            qr_token: 'QR-CORB-101',
-            fecha_emision: new Date().toISOString(),
-            fecha_vencimiento: null,
-            estatus: 'activo' as const,
-            fecha_impresion: null,
-            motivo_cancelacion: null,
-          },
-        ];
-
-        const vehiculos = (dbVehiculos && dbVehiculos.length > 0) ? dbVehiculos : [
-          {
-            id_vehiculo: 70,
-            id_empresa: 1,
-            marca: 'Ford',
-            modelo: 'F-150 Super Duty',
-            año: 2024,
-            placas: 'SON-7080-A',
-            color: 'Blanco Oxford',
-            foto_url: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
-            estatus_acceso: 'HABILITADO',
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-        ];
-
-        // Buscar corbatín coincidente por número o token QR
-        if (!matchedCorbatin) {
-          matchedCorbatin = corbatines.find((c: any) => {
-            const cNum = Number(c.numero);
-            if (numbers.includes(cNum)) return true;
-
-            if (c.qr_token) {
-              const cQrUpper = String(c.qr_token).toUpperCase();
-              const cQrClean = cQrUpper.replace(/[-_ ]/g, '');
-              for (const tok of tokens) {
-                const tUpper = tok.toUpperCase();
-                const tClean = tUpper.replace(/[-_ ]/g, '');
-                if (cQrUpper === tUpper || cQrClean === tClean) return true;
+              if (directCorb && directCorb.length > 0) {
+                matchedCorbatin = directCorb[0];
+                const { data: directVeh } = await supabase
+                  .from('vehiculos')
+                  .select(PROJECTIONS.VEHICULOS_LIGHT)
+                  .eq('id_vehiculo', matchedCorbatin.id_vehiculo)
+                  .limit(1);
+                if (directVeh && directVeh.length > 0) {
+                  matchedVehiculo = directVeh[0];
+                }
               }
             }
-            return false;
-          });
+
+            if (!matchedVehiculo && plates.length > 0) {
+              const validPlate = plates.find((p) => p.length >= 3) || plates[0];
+              const { data: directVeh } = await supabase
+                .from('vehiculos')
+                .select(PROJECTIONS.VEHICULOS_LIGHT)
+                .ilike('placas', `%${validPlate}%`)
+                .limit(1);
+
+              if (directVeh && directVeh.length > 0) {
+                matchedVehiculo = directVeh[0];
+                const { data: directCorb } = await supabase
+                  .from('corbatines')
+                  .select(PROJECTIONS.CORBATINES_LIGHT)
+                  .eq('id_vehiculo', matchedVehiculo.id_vehiculo)
+                  .limit(1);
+                matchedCorbatin = directCorb?.[0] || null;
+              }
+            }
+          } catch {}
         }
 
-        // Si se encontró corbatín, obtener el vehículo correspondiente
-        if (matchedCorbatin && !matchedVehiculo) {
-          matchedVehiculo =
-            matchedCorbatin.vehiculo ||
-            vehiculos.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo));
-        } else if (!matchedVehiculo) {
-          // Si NO se encontró corbatín por número ni token, buscar por PLACAS vehiculares
-          matchedVehiculo = vehiculos.find((v: any) => {
-            const plateStr = String(v.placas || v.placa || '').toUpperCase();
-            const plateClean = plateStr.replace(/[-_ ]/g, '');
-            for (const pl of plates) {
-              const pUpper = pl.toUpperCase();
-              const pClean = pUpper.replace(/[-_ ]/g, '');
-              if (plateClean.length >= 4 && (plateStr === pUpper || plateClean === pClean)) return true;
-            }
-            return false;
-          });
+        // 4.2 Si aún no se encuentra, verificar en datos previamente cacheados en memoria sin hacer peticiones nuevas
+        if (!matchedCorbatin || !matchedVehiculo) {
+          const cachedCorbs = apiCache.get<CorbatinRow[]>('corbatines_list', TTL_VEHICLES_CORBATINES) || [];
+          const cachedVehs = apiCache.get<VehiculoRow[]>('vehiculos_list', TTL_VEHICLES_CORBATINES) || [];
 
-          if (matchedVehiculo && !matchedCorbatin) {
-            matchedCorbatin = corbatines.find((c: any) => Number(c.id_vehiculo) === Number(matchedVehiculo.id_vehiculo)) || {
-              id_corbatin: 0,
-              id_vehiculo: matchedVehiculo.id_vehiculo,
-              numero: 0,
-              qr_token: 'S/C',
-              fecha_emision: new Date().toISOString(),
-              fecha_vencimiento: null,
-              estatus: 'activo',
-              fecha_impresion: null,
-              motivo_cancelacion: null,
-            };
+          if (cachedCorbs.length > 0 && !matchedCorbatin) {
+            matchedCorbatin = cachedCorbs.find((c: any) => numbers.includes(Number(c.numero)));
+          }
+          if (cachedVehs.length > 0 && !matchedVehiculo) {
+            matchedVehiculo = cachedVehs.find((v: any) => {
+              const plateStr = String(v.placas || '').toUpperCase();
+              return plates.some((p) => plateStr.includes(p.toUpperCase()));
+            });
           }
         }
       }
 
-      // Si no se encontró corbatín ni vehículo por placas, retornar null
-      if (!matchedCorbatin || !matchedVehiculo) {
+      // Si no se encontró ningún registro coincidente, retornar null sin consumir más red
+      if (!matchedCorbatin && !matchedVehiculo) {
         return null;
       }
 
       const corbatinRow: CorbatinRow = {
         id_corbatin: matchedCorbatin?.id_corbatin || 0,
-        id_vehiculo: matchedVehiculo.id_vehiculo,
+        id_vehiculo: matchedVehiculo?.id_vehiculo || 0,
         numero: matchedCorbatin?.numero || (numbers[0] || 0),
         qr_token: matchedCorbatin?.qr_token || 'S/C',
         fecha_emision: matchedCorbatin?.fecha_emision || new Date().toISOString(),
@@ -588,22 +629,25 @@ export const ApiService = {
       };
 
       const vehiculoRow: VehiculoRow = {
-        id_vehiculo: matchedVehiculo.id_vehiculo,
-        id_empresa: matchedVehiculo.id_empresa || 1,
-        marca: matchedVehiculo.marca || 'Genérica',
-        modelo: matchedVehiculo.modelo || 'Vehículo',
-        año: matchedVehiculo.año || matchedVehiculo.anio || 2024,
-        placas: matchedVehiculo.placas || matchedVehiculo.placa || 'SIN-PLACA',
-        color: matchedVehiculo.color || 'Blanco',
-        foto_url: matchedVehiculo.foto_url || matchedVehiculo.foto || 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
-        estatus_acceso: matchedVehiculo.estatus_acceso || 'HABILITADO',
-        created_at: matchedVehiculo.created_at || new Date().toISOString(),
-        updated_at: matchedVehiculo.updated_at || new Date().toISOString(),
+        id_vehiculo: matchedVehiculo?.id_vehiculo || 0,
+        id_empresa: matchedVehiculo?.id_empresa || 1,
+        marca: matchedVehiculo?.marca || 'Genérica',
+        modelo: matchedVehiculo?.modelo || 'Vehículo',
+        año: matchedVehiculo?.año || matchedVehiculo?.anio || 2024,
+        placas: matchedVehiculo?.placas || matchedVehiculo?.placa || 'SIN-PLACA',
+        color: matchedVehiculo?.color || 'Blanco',
+        foto_url:
+          matchedVehiculo?.foto_url ||
+          matchedVehiculo?.foto ||
+          'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
+        estatus_acceso: matchedVehiculo?.estatus_acceso || 'HABILITADO',
+        created_at: matchedVehiculo?.created_at || new Date().toISOString(),
+        updated_at: matchedVehiculo?.updated_at || new Date().toISOString(),
       };
 
-      const empresaRow: EmpresaRow = matchedVehiculo.empresa || {
-        id_empresa: matchedVehiculo.id_empresa || 1,
-        razon_social: matchedVehiculo.empresaNombre || 'Constructora y Mantenimiento Residencial',
+      const empresaRow: EmpresaRow = matchedVehiculo?.empresa || {
+        id_empresa: matchedVehiculo?.id_empresa || 1,
+        razon_social: matchedVehiculo?.empresaNombre || 'Constructora y Mantenimiento Residencial',
         responsable_nombre: 'Administración HOA',
         telefono: '(638) 382-8000',
         correo: 'contacto@hoa-laspalomas.com',
@@ -614,7 +658,7 @@ export const ApiService = {
 
       // Conductor asignado
       let conductorPrincipal: TrabajadorRow | undefined = undefined;
-      if (matchedVehiculo.conductor) {
+      if (matchedVehiculo?.conductor) {
         conductorPrincipal = {
           id_trabajador: matchedVehiculo.conductorId || 1,
           id_empresa: empresaRow.id_empresa,
@@ -628,14 +672,14 @@ export const ApiService = {
         };
       }
 
-      // Sanciones e infracciones históricas del vehículo consultadas concurrentemente (elimina waterfall)
-      const [todasSanciones, reportesVehiculo] = await Promise.all([
+      // Sanciones y conteo de infracciones optimizado (evita descargar 100 reportes completos)
+      const [todasSanciones, totalInfracciones] = await Promise.all([
         this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
-        this.getReportes({ idVehiculo: vehiculoRow.id_vehiculo, limit: 100 }),
+        this.getReportesCount({ idVehiculo: vehiculoRow.id_vehiculo }),
       ]);
 
       const sancionesActivas = (todasSanciones || [])
-        .filter((s: any) => (s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo'))
+        .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo')
         .map((s: any) => ({
           id_sancion: s.id_sancion,
           id_reporte: s.id_reporte || 1,
@@ -652,8 +696,6 @@ export const ApiService = {
           updated_at: s.updated_at || new Date().toISOString(),
         }));
 
-      const totalInfracciones = (reportesVehiculo || []).length;
-
       const result: CorbatinLookupResult = {
         corbatin: corbatinRow,
         vehiculo: vehiculoRow,
@@ -663,9 +705,7 @@ export const ApiService = {
         totalInfracciones,
       };
 
-      // Guardar en caché el resultado para futuras consultas idénticas
       apiCache.set(lookupCacheKey, result);
-
       return result;
     } catch (e) {
       console.warn('[ApiService] Error en buscarCorbatin:', e);
@@ -674,91 +714,130 @@ export const ApiService = {
   },
 
   /**
-   * Busca un vehículo por su placa (reutiliza el método unificado)
+   * Busca un vehículo por su placa
    */
   async buscarVehiculoPorPlaca(placa: string): Promise<CorbatinLookupResult | null> {
     return this.buscarCorbatin(placa);
   },
 
   /**
-   * Obtiene el catálogo de infracciones (con caché en memoria)
+   * Obtiene el catálogo de infracciones con caché persistente (TTL 30 min) y proyección de campos
    */
-  async getCatalogoInfracciones(): Promise<CatalogoInfraccionRow[]> {
-    const cacheKey = 'catalogo_infracciones';
-    const cached = apiCache.get<CatalogoInfraccionRow[]>(cacheKey, TTL_STATIC_CATALOGS);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/infracciones');
-      const mapped = (data || []).map((inf: any) => ({
-        id_infraccion: inf.id_infraccion,
-        id_reglamento: inf.id_reglamento || 1,
-        codigo: inf.codigo,
-        nombre: inf.nombre,
-        descripcion: inf.descripcion || '',
-        categoria: inf.categoria || 'General',
-        activo: inf.activo ?? true,
-      }));
-      apiCache.set(cacheKey, mapped);
-      return mapped;
-    } catch {
-      return [];
-    }
+  async getCatalogoInfracciones(forceRefresh = false): Promise<CatalogoInfraccionRow[]> {
+    return apiCache.getOrFetch(
+      'catalogo_infracciones',
+      TTL_STATIC_CATALOGS,
+      async () => {
+        try {
+          const data = await fetchJson('/infracciones');
+          if (Array.isArray(data)) {
+            return data.map((inf: any) => ({
+              id_infraccion: inf.id_infraccion,
+              id_reglamento: inf.id_reglamento || 1,
+              codigo: inf.codigo,
+              nombre: inf.nombre,
+              descripcion: inf.descripcion || '',
+              categoria: inf.categoria || 'General',
+              activo: inf.activo ?? true,
+            }));
+          }
+        } catch {
+          if (isSupabaseConfigured()) {
+            const { data } = await supabase
+              .from('catalogo_infracciones')
+              .select(PROJECTIONS.CATALOGO_INFRACCIONES)
+              .eq('activo', true)
+              .limit(100);
+            if (data && Array.isArray(data)) {
+              return data as CatalogoInfraccionRow[];
+            }
+          }
+        }
+        return [];
+      },
+      forceRefresh
+    );
   },
 
   /**
-   * Obtiene los reglamentos (con caché en memoria)
+   * Obtiene los reglamentos con caché persistente (TTL 30 min) y proyección de campos
    */
-  async getReglamentos(): Promise<ReglamentoRow[]> {
-    const cacheKey = 'reglamentos_list';
-    const cached = apiCache.get<ReglamentoRow[]>(cacheKey, TTL_STATIC_CATALOGS);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/reglamentos');
-      const mapped = (data || []).map((reg: any) => ({
-        id_reglamento: reg.id_reglamento,
-        version: reg.version || '2026.1',
-        titulo: reg.titulo || 'Reglamento General',
-        archivo_url: reg.archivo_url || '',
-        fecha_publicacion: reg.fecha_publicacion || new Date().toISOString(),
-        vigente: reg.vigente ?? true,
-        created_at: reg.created_at || new Date().toISOString(),
-      }));
-      apiCache.set(cacheKey, mapped);
-      return mapped;
-    } catch {
-      return [];
-    }
+  async getReglamentos(forceRefresh = false): Promise<ReglamentoRow[]> {
+    return apiCache.getOrFetch(
+      'reglamentos_list',
+      TTL_STATIC_CATALOGS,
+      async () => {
+        try {
+          const data = await fetchJson('/reglamentos');
+          if (Array.isArray(data)) {
+            return data.map((reg: any) => ({
+              id_reglamento: reg.id_reglamento,
+              version: reg.version || '2026.1',
+              titulo: reg.titulo || 'Reglamento General',
+              archivo_url: reg.archivo_url || '',
+              fecha_publicacion: reg.fecha_publicacion || new Date().toISOString(),
+              vigente: reg.vigente ?? true,
+              created_at: reg.created_at || new Date().toISOString(),
+            }));
+          }
+        } catch {
+          if (isSupabaseConfigured()) {
+            const { data } = await supabase
+              .from('reglamentos')
+              .select(PROJECTIONS.REGLAMENTOS)
+              .eq('vigente', true)
+              .limit(50);
+            if (data && Array.isArray(data)) {
+              return data as ReglamentoRow[];
+            }
+          }
+        }
+        return [];
+      },
+      forceRefresh
+    );
   },
 
   /**
-   * Obtiene las reglas de reincidencia (con caché en memoria)
+   * Obtiene las reglas de reincidencia con caché persistente (TTL 30 min)
    */
-  async getReglasReincidencia(): Promise<ReglaReincidenciaRow[]> {
-    const cacheKey = 'reglas_reincidencia';
-    const cached = apiCache.get<ReglaReincidenciaRow[]>(cacheKey, TTL_STATIC_CATALOGS);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/reglas');
-      const mapped = (data || []).map((r: any) => ({
-        id_regla: r.id_regla,
-        numero_falta: r.numero_falta,
-        permite_acceso: r.permite_acceso ?? true,
-        requiere_administrador: r.requiere_administrador ?? false,
-        mensaje_alerta: r.mensaje_alerta || '',
-        activo: r.activo ?? true,
-      }));
-      apiCache.set(cacheKey, mapped);
-      return mapped;
-    } catch {
-      return [];
-    }
+  async getReglasReincidencia(forceRefresh = false): Promise<ReglaReincidenciaRow[]> {
+    return apiCache.getOrFetch(
+      'reglas_reincidencia',
+      TTL_STATIC_CATALOGS,
+      async () => {
+        try {
+          const data = await fetchJson('/reglas');
+          if (Array.isArray(data)) {
+            return data.map((r: any) => ({
+              id_regla: r.id_regla,
+              numero_falta: r.numero_falta,
+              permite_acceso: r.permite_acceso ?? true,
+              requiere_administrador: r.requiere_administrador ?? false,
+              mensaje_alerta: r.mensaje_alerta || '',
+              activo: r.activo ?? true,
+            }));
+          }
+        } catch {
+          if (isSupabaseConfigured()) {
+            const { data } = await supabase
+              .from('reglas_reincidencia' as any)
+              .select(PROJECTIONS.REGLAS_REINCIDENCIA)
+              .eq('activo', true)
+              .limit(20);
+            if (data && Array.isArray(data)) {
+              return data as unknown as ReglaReincidenciaRow[];
+            }
+          }
+        }
+        return [];
+      },
+      forceRefresh
+    );
   },
 
   /**
-   * Registra un nuevo reporte de infracción e invalida la caché de reportes
+   * Registra un nuevo reporte de infracción e invalida selectivamente las cachés de reportes
    */
   async crearReporteInfraccion(params: {
     idVehiculo: number;
@@ -783,7 +862,7 @@ export const ApiService = {
         }),
       });
 
-      // Invalidar cachés relacionadas para que la próxima lectura traiga el nuevo reporte
+      // Invalidación selectiva de cachés
       apiCache.invalidate('reportes');
       apiCache.invalidate('lookup_');
       apiCache.invalidate('sanciones');
@@ -799,13 +878,62 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene la lista de reportes emitidos (con soporte para filtros y caché de corta duración)
+   * Obtiene la cantidad de reportes con Egress mínimo (0 a 50 bytes)
    */
-  async getReportes(options?: { idUsuario?: number; idVehiculo?: number; limit?: number; forceRefresh?: boolean } | number): Promise<any[]> {
+  async getReportesCount(options?: { idVehiculo?: number; idUsuario?: number }): Promise<number> {
+    const idVehiculo = options?.idVehiculo;
+    const idUsuario = options?.idUsuario;
+    const cacheKey = `reportes_count_${idVehiculo || 'all'}_${idUsuario || 'all'}`;
+
+    const cached = apiCache.get<number>(cacheKey, TTL_REPORTES);
+    if (cached !== null && cached !== undefined) return cached;
+
+    try {
+      const queryParams: string[] = ['count=1', 'limit=1'];
+      if (idVehiculo) queryParams.push(`id_vehiculo=${idVehiculo}`);
+      if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
+
+      const res = await fetchJson(`/reportes?${queryParams.join('&')}`);
+      if (typeof res?.count === 'number') {
+        apiCache.set(cacheKey, res.count);
+        return res.count;
+      }
+      if (Array.isArray(res)) {
+        apiCache.set(cacheKey, res.length);
+        return res.length;
+      }
+    } catch {
+      if (isSupabaseConfigured()) {
+        const count = await getCountOptimized(
+          'reportes_infracciones',
+          idVehiculo ? 'id_vehiculo' : idUsuario ? 'id_usuario' : undefined,
+          idVehiculo || idUsuario
+        );
+        apiCache.set(cacheKey, count);
+        return count;
+      }
+    }
+
+    return 0;
+  },
+
+  /**
+   * Obtiene la lista de reportes con soporte para límites y filtrado estricto por oficial
+   */
+  async getReportes(
+    options?:
+      | {
+          idUsuario?: number;
+          idVehiculo?: number;
+          limit?: number;
+          forceRefresh?: boolean;
+        }
+      | number
+  ): Promise<any[]> {
     let idUsuario: number | undefined;
     let idVehiculo: number | undefined;
     let limit: number | undefined;
-    let forceRefresh: boolean = false;
+    let forceRefresh = false;
 
     if (typeof options === 'number') {
       idUsuario = options;
@@ -816,35 +944,46 @@ export const ApiService = {
       forceRefresh = options.forceRefresh || false;
     }
 
-    const cacheKey = `reportes_list_${idUsuario || 'all'}_${idVehiculo || 'all'}_${limit || 'default'}`;
-    if (!forceRefresh) {
-      const cached = apiCache.get<any[]>(cacheKey, TTL_REPORTES);
-      if (cached) return cached;
-    }
+    const queryLimit = limit || 30; // Límite por defecto reducido para ahorrar ancho de banda
+    const cacheKey = `reportes_list_${idUsuario || 'all'}_${idVehiculo || 'all'}_${queryLimit}`;
 
-    try {
-      const queryParams: string[] = [];
-      if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
-      if (idVehiculo) queryParams.push(`id_vehiculo=${idVehiculo}`);
-      if (limit) queryParams.push(`limit=${limit}`);
-      const queryString = queryParams.length > 0 ? `?${queryParams.join('&')}` : '';
+    return apiCache.getOrFetch(
+      cacheKey,
+      TTL_REPORTES,
+      async () => {
+        try {
+          const queryParams: string[] = [`limit=${queryLimit}`];
+          if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
+          if (idVehiculo) queryParams.push(`id_vehiculo=${idVehiculo}`);
+          const queryString = `?${queryParams.join('&')}`;
 
-      const data = await fetchJson(`/reportes${queryString}`);
-      if (Array.isArray(data)) {
-        let filtered = data;
-        if (idUsuario && !queryString.includes('id_usuario')) {
-          filtered = filtered.filter((r: any) => r.id_usuario === idUsuario);
+          const data = await fetchJson(`/reportes${queryString}`);
+          if (Array.isArray(data)) {
+            return data;
+          }
+        } catch {
+          if (isSupabaseConfigured()) {
+            let query = (supabase as any)
+              .from('reportes_infracciones')
+              .select(
+                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, evidencias(id_evidencia, archivo, descripcion, fecha_captura)'
+              )
+              .order('id_reporte', { ascending: false })
+              .limit(queryLimit);
+
+            if (idUsuario) query = query.eq('id_usuario', idUsuario);
+            if (idVehiculo) query = query.eq('id_vehiculo', idVehiculo);
+
+            const { data } = await query;
+            if (data && Array.isArray(data)) {
+              return data;
+            }
+          }
         }
-        if (idVehiculo && !queryString.includes('id_vehiculo')) {
-          filtered = filtered.filter((r: any) => r.id_vehiculo === idVehiculo);
-        }
-        apiCache.set(cacheKey, filtered);
-        return filtered;
-      }
-      return [];
-    } catch {
-      return [];
-    }
+        return [];
+      },
+      forceRefresh
+    );
   },
 
   /**
@@ -891,71 +1030,78 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene vehículos (con caché en memoria)
+   * Obtiene vehículos con proyección ligera
    */
   async getVehiculos(): Promise<VehiculoRow[]> {
-    const cacheKey = 'vehiculos_list';
-    const cached = apiCache.get<VehiculoRow[]>(cacheKey, TTL_VEHICLES_CORBATINES);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/vehiculos');
-      if (Array.isArray(data)) {
-        apiCache.set(cacheKey, data);
-        return data;
+    return apiCache.getOrFetch('vehiculos_list', TTL_VEHICLES_CORBATINES, async () => {
+      try {
+        const data = await fetchJson('/vehiculos?limit=50');
+        if (Array.isArray(data)) {
+          return data;
+        }
+      } catch {
+        if (isSupabaseConfigured()) {
+          const { data } = await supabase
+            .from('vehiculos')
+            .select(PROJECTIONS.VEHICULOS_LIGHT)
+            .limit(50);
+          if (data && Array.isArray(data)) {
+            return data as VehiculoRow[];
+          }
+        }
       }
       return [];
-    } catch {
-      return [];
-    }
+    });
   },
 
   /**
-   * Obtiene empresas (con caché en memoria)
+   * Obtiene empresas con proyección ligera
    */
   async getEmpresas(): Promise<EmpresaRow[]> {
-    const cacheKey = 'empresas_list';
-    const cached = apiCache.get<EmpresaRow[]>(cacheKey, TTL_STATIC_CATALOGS);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/empresas');
-      if (Array.isArray(data)) {
-        apiCache.set(cacheKey, data);
-        return data;
-      }
+    return apiCache.getOrFetch('empresas_list', TTL_STATIC_CATALOGS, async () => {
+      try {
+        const data = await fetchJson('/empresas?limit=50');
+        if (Array.isArray(data)) {
+          return data;
+        }
+      } catch {}
       return [];
-    } catch {
-      return [];
-    }
+    });
   },
 
   /**
-   * Obtiene corbatines (con caché en memoria)
+   * Obtiene corbatines con proyección ligera
    */
   async getCorbatines(): Promise<CorbatinRow[]> {
-    const cacheKey = 'corbatines_list';
-    const cached = apiCache.get<CorbatinRow[]>(cacheKey, TTL_VEHICLES_CORBATINES);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/corbatines');
-      if (Array.isArray(data)) {
-        apiCache.set(cacheKey, data);
-        return data;
+    return apiCache.getOrFetch('corbatines_list', TTL_VEHICLES_CORBATINES, async () => {
+      try {
+        const data = await fetchJson('/corbatines?limit=50');
+        if (Array.isArray(data)) {
+          return data;
+        }
+      } catch {
+        if (isSupabaseConfigured()) {
+          const { data } = await supabase
+            .from('corbatines')
+            .select(PROJECTIONS.CORBATINES_LIGHT)
+            .limit(50);
+          if (data && Array.isArray(data)) {
+            return data as CorbatinRow[];
+          }
+        }
       }
       return [];
-    } catch {
-      return [];
-    }
+    });
   },
 
   /**
-   * Obtiene sanciones (con soporte para filtrado por vehículo y caché en memoria)
+   * Obtiene sanciones con soporte para filtrado por vehículo y proyección ligera
    */
-  async getSanciones(options?: { idVehiculo?: number; forceRefresh?: boolean } | number): Promise<any[]> {
+  async getSanciones(
+    options?: { idVehiculo?: number; forceRefresh?: boolean } | number
+  ): Promise<any[]> {
     let idVehiculo: number | undefined;
-    let forceRefresh: boolean = false;
+    let forceRefresh = false;
 
     if (typeof options === 'number') {
       idVehiculo = options;
@@ -965,46 +1111,48 @@ export const ApiService = {
     }
 
     const cacheKey = `sanciones_list_${idVehiculo || 'all'}`;
-    if (!forceRefresh) {
-      const cached = apiCache.get<any[]>(cacheKey, TTL_VEHICLES_CORBATINES);
-      if (cached) return cached;
-    }
 
-    try {
-      const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}` : '';
-      const data = await fetchJson(`/sanciones${queryParam}`);
-      if (Array.isArray(data)) {
-        let filtered = data;
-        if (idVehiculo && !queryParam) {
-          filtered = data.filter((s: any) => s.id_vehiculo === idVehiculo);
+    return apiCache.getOrFetch(
+      cacheKey,
+      TTL_VEHICLES_CORBATINES,
+      async () => {
+        try {
+          const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}&limit=20` : '?limit=20';
+          const data = await fetchJson(`/sanciones${queryParam}`);
+          if (Array.isArray(data)) {
+            return data;
+          }
+        } catch {
+          if (isSupabaseConfigured()) {
+            let query = (supabase as any)
+              .from('sanciones' as any)
+              .select(PROJECTIONS.SANCIONES_LIGHT)
+              .limit(20);
+            if (idVehiculo) query = query.eq('id_vehiculo', idVehiculo);
+            const { data } = await query;
+            if (data && Array.isArray(data)) {
+              return data;
+            }
+          }
         }
-        apiCache.set(cacheKey, filtered);
-        return filtered;
-      }
-      return [];
-    } catch {
-      return [];
-    }
+        return [];
+      },
+      forceRefresh
+    );
   },
 
   /**
-   * Obtiene casetas (con caché en memoria)
+   * Obtiene casetas con caché persistente
    */
   async getCasetas(): Promise<any[]> {
-    const cacheKey = 'casetas_list';
-    const cached = apiCache.get<any[]>(cacheKey, TTL_STATIC_CATALOGS);
-    if (cached) return cached;
-
-    try {
-      const data = await fetchJson('/casetas');
-      if (Array.isArray(data)) {
-        apiCache.set(cacheKey, data);
-        return data;
-      }
+    return apiCache.getOrFetch('casetas_list', TTL_STATIC_CATALOGS, async () => {
+      try {
+        const data = await fetchJson('/casetas');
+        if (Array.isArray(data)) {
+          return data;
+        }
+      } catch {}
       return [];
-    } catch {
-      return [];
-    }
+    });
   },
 };
-

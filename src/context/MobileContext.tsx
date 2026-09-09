@@ -5,6 +5,8 @@ import { ReporteInfraccion } from '../types/reporte';
 import { CatalogoInfraccionRow, ReglamentoRow } from '../types/database';
 import { SupabaseService } from '../services/supabaseService';
 
+const memoryStorageMap = new Map<string, string>();
+
 const safeStorage = {
   getItem: (key: string): string | null => {
     try {
@@ -12,7 +14,7 @@ const safeStorage = {
         return window.localStorage.getItem(key);
       }
     } catch {}
-    return null;
+    return memoryStorageMap.get(key) || null;
   },
   setItem: (key: string, value: string): void => {
     try {
@@ -20,6 +22,7 @@ const safeStorage = {
         window.localStorage.setItem(key, value);
       }
     } catch {}
+    memoryStorageMap.set(key, value);
   },
   removeItem: (key: string): void => {
     try {
@@ -27,6 +30,7 @@ const safeStorage = {
         window.localStorage.removeItem(key);
       }
     } catch {}
+    memoryStorageMap.delete(key);
   },
 };
 
@@ -108,11 +112,14 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [reglamentos, setReglamentos] = useState<ReglamentoRow[]>([]);
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>('light');
 
+  const agenteRef = React.useRef(agenteActual);
+  agenteRef.current = agenteActual;
+
   const cargarCatalogo = useCallback(async (forceRefresh = false) => {
     try {
       const [infs, regs] = await Promise.all([
-        SupabaseService.getCatalogoInfracciones(),
-        SupabaseService.getReglamentos(),
+        SupabaseService.getCatalogoInfracciones(forceRefresh),
+        SupabaseService.getReglamentos(forceRefresh),
       ]);
       if (infs && infs.length > 0) setCatalogoInfracciones(infs);
       if (regs && regs.length > 0) setReglamentos(regs);
@@ -123,9 +130,14 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const cargarReportes = useCallback(async (forceRefresh = false, idUsuario?: number) => {
     try {
+      const currentAgenteId = agenteRef.current?.id;
+      const targetUserId = idUsuario !== undefined
+        ? idUsuario
+        : (currentAgenteId ? parseInt(currentAgenteId.replace(/\D/g, ''), 10) : undefined);
+
       const dbReportes = await SupabaseService.getReportes({
-        idUsuario: idUsuario || undefined,
-        limit: 100,
+        idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
+        limit: 30,
         forceRefresh,
       });
       if (dbReportes && dbReportes.length > 0) {
@@ -170,75 +182,45 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   }, []);
 
+  // Inicialización única al montar el componente
   useEffect(() => {
-    const syncUserWithDb = async () => {
+    const initApp = async () => {
       try {
         const localAuth = safeStorage.getItem('hoa_mobile_auth');
         const localAgente = safeStorage.getItem('hoa_mobile_agente');
         const localTheme = safeStorage.getItem('hoa_mobile_theme');
 
-        if (localAuth === 'true') {
-          setIsAuthenticated(true);
-        }
         if (localTheme === 'light' || localTheme === 'dark') {
           setThemeMode(localTheme);
         }
 
-        let parsed: any = null;
-        if (localAgente) {
+        if (localAuth === 'true' && localAgente) {
           try {
-            parsed = JSON.parse(localAgente);
-            if (parsed && parsed.id) {
-              setAgenteActual({
+            const parsed = JSON.parse(localAgente);
+            if (parsed && (parsed.id || parsed.id_usuario)) {
+              const activeAgente: Agente = {
                 ...parsed,
+                id: String(parsed.id || parsed.id_usuario),
                 turno: computeTurno(),
                 zona: parsed.zona || computeZona(parsed.rol),
                 avatarUrl: getAvatarUrl(parsed.nombre, parsed.foto_url || parsed.avatarUrl || parsed.avatar),
-              });
-              // Si ya tenemos el usuario parseado en almacenamiento seguro, evitamos consultar la lista completa
-              return;
+              };
+              setAgenteActual(activeAgente);
+              setIsAuthenticated(true);
+              const officerId = parseInt(activeAgente.id.replace(/\D/g, ''), 10);
+              cargarReportes(false, !isNaN(officerId) ? officerId : undefined);
             }
           } catch {}
         }
-
-        // Sincronizar usuario activo usando caché si no hay datos locales
-        const users = await SupabaseService.getUsuarios();
-        if (users && users.length > 0) {
-          const found = users.find(
-            (u: any) =>
-              u.nombre?.toLowerCase().includes('kenet') ||
-              (u.rolNombre || u.rol || '').toLowerCase().includes('agente') ||
-              (u.rolNombre || u.rol || '').toLowerCase().includes('caseta') ||
-              u.nombre?.toLowerCase().includes('carlos')
-          ) || users[0];
-
-          if (found) {
-            const role = found.rolNombre || found.rol || 'Agente de Seguridad';
-            const dbAvatar = getAvatarUrl(found.nombre, found.foto_url || found.avatar || found.foto || found.imagen);
-            const syncedAgente: Agente = {
-              id: String(found.id_usuario || found.id || 1),
-              nombre: found.nombre || 'Oficial en Servicio',
-              correo: found.correo || '',
-              rol: role,
-              numEmpleado: `AG-2026-${String(found.id_usuario || found.id || 1).padStart(3, '0')}`,
-              turno: computeTurno(),
-              zona: computeZona(role),
-              estadoServicio: 'activo',
-              avatarUrl: dbAvatar,
-            };
-            setAgenteActual(syncedAgente);
-            safeStorage.setItem('hoa_mobile_agente', JSON.stringify(syncedAgente));
-          }
-        }
       } catch (e) {
-        console.warn('Error syncing user with DB:', e);
+        console.warn('Error inicializando contexto:', e);
+      } finally {
+        cargarCatalogo(false);
       }
     };
 
-    syncUserWithDb();
-    cargarReportes();
-    cargarCatalogo();
-  }, [cargarReportes, cargarCatalogo]);
+    initApp();
+  }, [cargarCatalogo, cargarReportes]);
 
   const saveReportes = useCallback((newReportes: ReporteInfraccion[]) => {
     setReportes(newReportes);
@@ -255,34 +237,39 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const login = useCallback(async (usuario: string, contrasena: string): Promise<boolean> => {
     const dbUser = await SupabaseService.login(usuario, contrasena);
-    if (dbUser) {
+    if (dbUser && (dbUser.id_usuario || dbUser.id)) {
       const role = dbUser.rolNombre || dbUser.roles?.nombre || dbUser.rol || 'Agente de Seguridad';
       const avatar = getAvatarUrl(dbUser.nombre, dbUser.foto_url || dbUser.avatar || dbUser.avatarUrl || dbUser.foto);
+      const officerNumericId = Number(dbUser.id_usuario || dbUser.id || 1);
       const agente: Agente = {
-        id: String(dbUser.id_usuario || dbUser.id || 1),
+        id: String(officerNumericId),
         nombre: dbUser.nombre || 'Oficial de Seguridad',
         correo: dbUser.correo || '',
         rol: role,
-        numEmpleado: dbUser.numEmpleado || `AG-2026-${String(dbUser.id_usuario || dbUser.id || 1).padStart(3, '0')}`,
+        numEmpleado: dbUser.numEmpleado || `AG-2026-${String(officerNumericId).padStart(3, '0')}`,
         turno: computeTurno(),
         zona: computeZona(role),
         estadoServicio: 'activo',
         avatarUrl: avatar,
       };
-      setAgenteActual(agente);
-      setIsAuthenticated(true);
       safeStorage.setItem('hoa_mobile_auth', 'true');
       safeStorage.setItem('hoa_mobile_agente', JSON.stringify(agente));
-      cargarReportes();
-      cargarCatalogo();
+      setAgenteActual(agente);
+      setIsAuthenticated(true);
+      cargarReportes(true, officerNumericId);
+      cargarCatalogo(false);
       return true;
     }
     return false;
   }, [cargarReportes, cargarCatalogo]);
 
   const logout = useCallback(() => {
-    setIsAuthenticated(false);
     safeStorage.removeItem('hoa_mobile_auth');
+    safeStorage.removeItem('hoa_mobile_agente');
+    safeStorage.removeItem('hoa_mobile_reportes');
+    setIsAuthenticated(false);
+    setAgenteActual(DEFAULT_AGENTE);
+    setReportes([]);
   }, []);
 
   const agregarReporte = useCallback(async (

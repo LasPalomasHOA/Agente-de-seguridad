@@ -16,7 +16,6 @@ import { useMobile } from '../context/MobileContext';
 import { ThemedText } from '@/components/themed-text';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { SupabaseService } from '../services/supabaseService';
 import { ReporteInfraccion } from '../types/reporte';
 import { Evidencia } from '../types/evidencia';
 
