@@ -386,7 +386,13 @@ export default function ReportsScreen() {
                   </View>
                   <View style={{ flex: 1, gap: 1 }}>
                     <ThemedText style={styles.targetCorbatinTitle}>
-                      {rep.corbatinNumero ? `Corbatín #${rep.corbatinNumero.replace(/\D/g, '') || rep.corbatinNumero}` : 'Sin Corbatín'}
+                      {(() => {
+                        if (!rep.corbatinNumero || rep.corbatinNumero === 'S/C') return 'Sin Corbatín';
+                        const digits = rep.corbatinNumero.replace(/\D/g, '');
+                        if (!digits) return `Corbatín #${rep.corbatinNumero}`;
+                        const cleanNum = digits.startsWith('2026') && digits.length > 4 ? digits.slice(4) : digits;
+                        return `Corbatín #${cleanNum ? parseInt(cleanNum, 10) : rep.corbatinNumero}`;
+                      })()}
                     </ThemedText>
                     <ThemedText style={styles.targetVehicleSub} numberOfLines={1}>
                       📍 {rep.lugar || 'Zona Residencial'}
@@ -515,7 +521,15 @@ export default function ReportsScreen() {
                     </View>
                     <View style={styles.modalInfoBox}>
                       <ThemedText style={styles.modalInfoLabel}>CORBATÍN ASIGNADO</ThemedText>
-                      <ThemedText style={styles.modalInfoValueBold}>{selectedReport.corbatinNumero || 'S/C'}</ThemedText>
+                      <ThemedText style={styles.modalInfoValueBold}>
+                        {(() => {
+                          if (!selectedReport.corbatinNumero || selectedReport.corbatinNumero === 'S/C') return 'S/C';
+                          const digits = selectedReport.corbatinNumero.replace(/\D/g, '');
+                          if (!digits) return selectedReport.corbatinNumero;
+                          const cleanNum = digits.startsWith('2026') && digits.length > 4 ? digits.slice(4) : digits;
+                          return `Corbatín #${cleanNum ? parseInt(cleanNum, 10) : selectedReport.corbatinNumero}`;
+                        })()}
+                      </ThemedText>
                     </View>
                   </View>
 

@@ -155,7 +155,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             id: `rep_${r.id_reporte}`,
             folio: `F-2026-${String(r.id_reporte).padStart(4, '0')}`,
             vehiculoId: String(r.id_vehiculo),
-            corbatinNumero: r.corbatin?.numero ? `C-2026-${String(r.corbatin.numero).padStart(3, '0')}` : (r.id_corbatin ? `C-2026-${String(r.id_corbatin).padStart(3, '0')}` : 'S/C'),
+            corbatinNumero: r.corbatin?.numero ? `C-${r.corbatin.numero}` : (r.id_corbatin ? `C-${r.id_corbatin}` : 'S/C'),
             infraccionCodigo: r.infraccion?.codigo || r.catalogo_infracciones?.codigo || 'INF-01',
             lugar: r.ubicacion_texto || 'Área Común',
             fecha: (r.fecha_hora || '').split('T')[0] || new Date().toISOString().split('T')[0],

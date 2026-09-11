@@ -250,7 +250,7 @@ export default function ScannerScreen() {
       const folio = await agregarReporte(
         {
           vehiculoId: String(selectedVehicle.id_vehiculo),
-          corbatinNumero: selectedCorbatin?.numero ? `C-2026-${String(selectedCorbatin.numero).padStart(3, '0')}` : 'S/C',
+          corbatinNumero: selectedCorbatin?.numero ? `C-${selectedCorbatin.numero}` : 'S/C',
           infraccionCodigo: selectedInfraccion.codigo,
           idVehiculo: Number(selectedVehicle.id_vehiculo),
           idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
@@ -273,10 +273,12 @@ export default function ScannerScreen() {
   };
 
   const isSuspended =
-    selectedCorbatin?.estatus === 'suspendido' ||
-    selectedCorbatin?.estatus === 'cancelado' ||
-    selectedVehicle?.estatus_acceso === 'denegado' ||
-    selectedVehicle?.estatus_acceso === 'suspendido' ||
+    (selectedCorbatin?.estatus || '').toLowerCase() === 'suspendido' ||
+    (selectedCorbatin?.estatus || '').toLowerCase() === 'cancelado' ||
+    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'denegado' ||
+    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'suspendido' ||
+    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'restringido' ||
+    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'bloqueado' ||
     sancionesActivas.length > 0;
 
   return (
@@ -924,7 +926,7 @@ export default function ScannerScreen() {
                   await agregarReporte(
                     {
                       vehiculoId: String(selectedVehicle.id_vehiculo),
-                      corbatinNumero: selectedCorbatin?.numero ? `C-2026-${String(selectedCorbatin.numero).padStart(3, '0')}` : 'S/C',
+                      corbatinNumero: selectedCorbatin?.numero ? `C-${selectedCorbatin.numero}` : 'S/C',
                       infraccionCodigo: selectedInfraccion.codigo,
                       idVehiculo: Number(selectedVehicle.id_vehiculo),
                       idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
