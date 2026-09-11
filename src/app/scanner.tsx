@@ -182,12 +182,6 @@ export default function ScannerScreen() {
   }, [mode, laserAnim]);
 
   // Actions
-  const handleTriggerScanSimulate = async () => {
-    const simulationPool = ['70', '101', 'SON-7080-A', 'LP-HOA|CORB:105|PLACAS:X|VIG:2026-2027'];
-    const randCode = simulationPool[Math.floor(Math.random() * simulationPool.length)];
-    executeLookup(randCode);
-  };
-
   const handleManualSearch = (codeToSearch?: string) => {
     const target = codeToSearch || manualCorbatinInput;
     if (!target.trim()) return;
@@ -400,21 +394,6 @@ export default function ScannerScreen() {
                 </View>
               </View>
             )}
-
-            {/* Quick Simulate Trigger in Palomas Emerald */}
-            <Pressable
-              onPress={handleTriggerScanSimulate}
-              style={({ pressed }) => [
-                styles.simulateScanButton,
-                { backgroundColor: '#0D6E5F' },
-                pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
-              ]}
-            >
-              <Ionicons name="scan" size={18} color="#ffffff" />
-              <ThemedText style={[styles.simulateScanText, { color: '#ffffff' }]}>
-                Simular Detección de QR
-              </ThemedText>
-            </Pressable>
           </View>
 
           {/* Manual Input Card */}
@@ -1449,26 +1428,6 @@ const styles = StyleSheet.create({
   bracketTR: { top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3 },
   bracketBL: { bottom: 0, left: 0, borderBottomWidth: 3, borderLeftWidth: 3 },
   bracketBR: { bottom: 0, right: 0, borderBottomWidth: 3, borderRightWidth: 3 },
-  simulateScanButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#0D6E5F',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 12,
-    gap: 6,
-    marginTop: 4,
-    shadowColor: '#0D6E5F',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  simulateScanText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '900',
-  },
   manualEntryCard: {
     backgroundColor: '#ffffff',
     borderRadius: 16,

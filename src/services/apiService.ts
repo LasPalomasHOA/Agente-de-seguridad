@@ -54,29 +54,62 @@ export interface CorbatinLookupResult {
   totalInfracciones: number;
 }
 
+// Caché de ETags HTTP para respuestas 304 Not Modified (0 bytes de payload de red)
+const httpEtagCache = new Map<string, { etag: string; data: any }>();
+
 const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> => {
   const url = `${API_BASE_URL}${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
+  const isGet = !options?.method || options.method.toUpperCase() === 'GET';
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((options?.headers as any) || {}),
+  };
+
+  // Cabecera condicional para ahorro de Egress
+  if (isGet) {
+    const cachedEntry = httpEtagCache.get(url);
+    if (cachedEntry?.etag) {
+      headers['If-None-Match'] = cachedEntry.etag;
+    }
+  }
+
   try {
     const res = await fetch(url, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options?.headers || {}),
-      },
+      headers,
     });
+
+    // 304 Not Modified: datos intactos, devolver caché local sin consumir ancho de banda
+    if (res.status === 304 && isGet) {
+      const cached = httpEtagCache.get(url);
+      if (cached) {
+        return cached.data;
+      }
+    }
 
     if (!res.ok) {
       const errorText = await res.text().catch(() => '');
       let errorJson: any = null;
       try {
         errorJson = JSON.parse(errorText);
-      } catch {}
+      } catch { }
       throw new Error(
         errorJson?.error || errorJson?.message || `HTTP ${res.status}: ${errorText || res.statusText}`
       );
     }
 
-    return await res.json();
+    const data = await res.json();
+
+    // Guardar ETag recibido para futuras peticiones condicionales
+    if (isGet) {
+      const etag = res.headers.get('etag') || res.headers.get('ETag');
+      if (etag) {
+        httpEtagCache.set(url, { etag, data });
+      }
+    }
+
+    return data;
   } catch (err: any) {
     // Reducir ruido de logs en consola cuando es fallback esperado
     if (!err.message?.includes('Failed to fetch') && !err.message?.includes('Network request failed')) {
@@ -95,7 +128,7 @@ const safeStorage = {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         return window.localStorage.getItem(key);
       }
-    } catch {}
+    } catch { }
     return memoryStorageMap.get(key) || null;
   },
   setItem: (key: string, value: string): void => {
@@ -103,7 +136,7 @@ const safeStorage = {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         window.localStorage.setItem(key, value);
       }
-    } catch {}
+    } catch { }
     memoryStorageMap.set(key, value);
   },
   removeItem: (key: string): void => {
@@ -111,7 +144,7 @@ const safeStorage = {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         window.localStorage.removeItem(key);
       }
-    } catch {}
+    } catch { }
     memoryStorageMap.delete(key);
   },
 };
@@ -150,7 +183,7 @@ class PersistentApiCache {
           }
         }
       }
-    } catch {}
+    } catch { }
 
     return null;
   }
@@ -160,7 +193,15 @@ class PersistentApiCache {
     this.memoryCache.set(key, entry);
     try {
       safeStorage.setItem(`hoa_cache_${key}`, JSON.stringify(entry));
-    } catch {}
+    } catch { }
+  }
+
+  /**
+   * Guarda únicamente en memoria RAM sin bloquear el hilo principal con serialización I/O a disco/localStorage
+   */
+  setMemoryOnly<T>(key: string, data: T): void {
+    const entry: CacheEntry<T> = { data, timestamp: Date.now() };
+    this.memoryCache.set(key, entry);
   }
 
   /**
@@ -202,15 +243,37 @@ class PersistentApiCache {
   invalidate(keyPrefix?: string): void {
     if (!keyPrefix) {
       this.memoryCache.clear();
+      memoryStorageMap.clear();
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        try {
+          const keys = Object.keys(window.localStorage);
+          keys.filter((k) => k.startsWith('hoa_cache_')).forEach((k) => window.localStorage.removeItem(k));
+        } catch { }
+      }
       return;
     }
+
+    // 1. Limpiar memoria RAM
     for (const key of this.memoryCache.keys()) {
       if (key.startsWith(keyPrefix)) {
         this.memoryCache.delete(key);
-        try {
-          safeStorage.removeItem(`hoa_cache_${key}`);
-        } catch {}
       }
+    }
+
+    // 2. Limpiar memoryStorageMap
+    const memoryKeys = Array.from(memoryStorageMap.keys());
+    for (const key of memoryKeys) {
+      if (key.startsWith(`hoa_cache_${keyPrefix}`)) {
+        memoryStorageMap.delete(key);
+      }
+    }
+
+    // 3. Limpiar localStorage en Web (Extracción estática para no mutar el índice en iteración)
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const keys = Object.keys(window.localStorage);
+        keys.filter((k) => k.startsWith(`hoa_cache_${keyPrefix}`)).forEach((k) => window.localStorage.removeItem(k));
+      } catch { }
     }
   }
 }
@@ -335,6 +398,7 @@ export const ApiService = {
    */
   extractSearchTokens(raw: string): { numbers: number[]; tokens: string[]; plates: string[] } {
     const clean = (raw || '').trim();
+    const isPureNumber = /^\d+$/.test(clean);
     const candidates: {
       numbers: number[];
       tokens: string[];
@@ -342,7 +406,8 @@ export const ApiService = {
     } = {
       numbers: [],
       tokens: [clean],
-      plates: [clean],
+      // Solo inicializar en placas si NO es un número puro
+      plates: isPureNumber ? [] : [clean],
     };
 
     if (!clean) return candidates;
@@ -413,7 +478,7 @@ export const ApiService = {
           if (parsed.placas) candidates.plates.push(String(parsed.placas));
           if (parsed.placa) candidates.plates.push(String(parsed.placa));
         }
-      } catch {}
+      } catch { }
     }
 
     // 4. URL parse
@@ -435,11 +500,11 @@ export const ApiService = {
           candidates.tokens.push(lastSegment);
           if (!isNaN(Number(lastSegment))) candidates.numbers.push(Number(lastSegment));
         }
-      } catch {}
+      } catch { }
     }
 
     // 5. Número entero directo
-    if (/^\d+$/.test(clean)) {
+    if (isPureNumber) {
       candidates.numbers.push(parseInt(clean, 10));
     }
 
@@ -472,75 +537,159 @@ export const ApiService = {
     }
 
     candidates.tokens.push(clean.replace(/[-_ ]/g, ''));
-    candidates.plates.push(clean.replace(/[-_ ]/g, ''));
+    if (!isPureNumber) {
+      candidates.plates.push(clean.replace(/[-_ ]/g, ''));
+    }
 
     candidates.numbers = Array.from(new Set(candidates.numbers.filter((n) => !isNaN(n) && n > 0)));
     candidates.tokens = Array.from(new Set(candidates.tokens.filter(Boolean)));
-    candidates.plates = Array.from(new Set(candidates.plates.filter(Boolean)));
+    candidates.plates = Array.from(
+      new Set(
+        candidates.plates.filter((p) => {
+          if (!p || typeof p !== 'string') return false;
+          const up = p.trim().toUpperCase();
+          if (up === 'SIN' || up === 'N/A' || up === 'S/P' || up === 'X') return false;
+          // Descartar dígitos puros si el texto original no tenía prefijo explícito de placas
+          if (/^\d+$/.test(up) && !clean.toUpperCase().includes('PLACA') && !clean.toUpperCase().includes('PLATE')) {
+            return false;
+          }
+          return up.length >= 3;
+        })
+      )
+    );
 
     return candidates;
   },
 
   /**
-   * Busca un corbatín o placa de forma ultra-optimizada sin descargas masivas de tablas
+   * Genera las claves de caché canónicas y alias para búsqueda unificada
+   */
+  getCanonicalLookupKeys(param: string): {
+    primaryKey: string;
+    aliasKeys: string[];
+    numbers: number[];
+    tokens: string[];
+    plates: string[];
+  } {
+    const { numbers, tokens, plates } = this.extractSearchTokens(param);
+    const aliasKeys: string[] = [];
+
+    let primaryKey = '';
+    if (numbers.length > 0) {
+      primaryKey = `lookup_num_${numbers[0]}`;
+    } else if (plates.length > 0 && plates[0]) {
+      const cleanPlate = plates[0].toUpperCase().replace(/[-_ ]/g, '');
+      primaryKey = `lookup_plate_${cleanPlate}`;
+    } else {
+      primaryKey = `lookup_raw_${param.trim().toLowerCase()}`;
+    }
+
+    for (const num of numbers) {
+      aliasKeys.push(`lookup_num_${num}`);
+    }
+    for (const plate of plates) {
+      if (plate) {
+        const upper = plate.toUpperCase();
+        aliasKeys.push(`lookup_plate_${upper}`);
+        aliasKeys.push(`lookup_plate_${upper.replace(/[-_ ]/g, '')}`);
+      }
+    }
+    aliasKeys.push(`lookup_raw_${param.trim().toLowerCase()}`);
+
+    return {
+      primaryKey,
+      aliasKeys: Array.from(new Set(aliasKeys)),
+      numbers,
+      tokens,
+      plates,
+    };
+  },
+
+  /**
+   * Busca un corbatín o placa de forma ultra-optimizada sin descargas masivas de tablas ni cascadas N+1
    */
   async buscarCorbatin(param: string): Promise<CorbatinLookupResult | null> {
     try {
       const cleanParam = (param || '').trim();
       if (!cleanParam) return null;
 
-      // 1. Revisar si la consulta ya está en caché reciente
-      const lookupCacheKey = `lookup_${cleanParam.toLowerCase()}`;
-      const cachedResult = apiCache.get<CorbatinLookupResult>(lookupCacheKey, TTL_LOOKUPS);
-      if (cachedResult) {
-        return cachedResult;
+      // 1. Revisar si la consulta ya está en caché reciente bajo su clave canónica o algún alias
+      const { primaryKey, aliasKeys, numbers, plates } = this.getCanonicalLookupKeys(cleanParam);
+      for (const key of aliasKeys) {
+        const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
+        if (cachedResult) {
+          return cachedResult;
+        }
       }
-
-      // 2. Extraer tokens de búsqueda
-      const { numbers, tokens, plates } = this.extractSearchTokens(cleanParam);
 
       let matchedCorbatin: any = null;
       let matchedVehiculo: any = null;
+      let expressSucceeded = false;
 
-      // 3. Consulta puntual directa con filtros de servidor (Ahorro de Egress >95%)
+      // 2. Consulta puntual directa con filtros de servidor (Ahorro de Egress >95%)
       try {
-        // 3.1 Búsqueda puntual por número de corbatín
+        // 2.1 Búsqueda puntual estricta por número de corbatín
         if (numbers.length > 0) {
-          const directCorbRes = await fetchJson(`/corbatines?numero=${numbers[0]}&limit=1`);
+          const targetNum = numbers[0];
+          const directCorbRes = await fetchJson(`/corbatines?numero=${targetNum}&limit=1`);
+          expressSucceeded = true;
           const corbList = Array.isArray(directCorbRes)
             ? directCorbRes
             : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
 
           if (corbList.length > 0) {
-            matchedCorbatin = corbList.find((c: any) => Number(c.numero) === numbers[0]) || corbList[0];
-            if (matchedCorbatin?.vehiculo) {
-              matchedVehiculo = matchedCorbatin.vehiculo;
-            } else if (matchedCorbatin?.id_vehiculo) {
-              const directVehRes = await fetchJson(`/vehiculos?id_vehiculo=${matchedCorbatin.id_vehiculo}&limit=1`).catch(() => null);
-              const vList = Array.isArray(directVehRes)
-                ? directVehRes
-                : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
-              matchedVehiculo = vList.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo)) || vList[0];
+            const matched = corbList.find((c: any) => Number(c.numero) === targetNum);
+            if (matched && Number(matched.numero) === targetNum) {
+              matchedCorbatin = matched;
+              if (matchedCorbatin.vehiculo) {
+                matchedVehiculo = matchedCorbatin.vehiculo;
+              } else if (matchedCorbatin.id_vehiculo) {
+                const directVehRes = await fetchJson(`/vehiculos?id_vehiculo=${matchedCorbatin.id_vehiculo}&limit=1`).catch(() => null);
+                const vList = Array.isArray(directVehRes)
+                  ? directVehRes
+                  : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
+                const matchedV = vList.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo));
+                if (matchedV) {
+                  matchedVehiculo = matchedV;
+                }
+              }
             }
           }
         }
 
-        // 3.2 Búsqueda puntual por placas vehiculares
+        // 2.2 Búsqueda puntual estricta por placas vehiculares
         if (!matchedVehiculo && plates.length > 0) {
           const validPlate = plates.find((p) => p.length >= 3) || plates[0];
           if (validPlate) {
-            const directVehRes = await fetchJson(`/vehiculos?placas=${encodeURIComponent(validPlate)}&limit=1`).catch(() => null);
+            const cleanTargetPlate = validPlate.toUpperCase().replace(/[-_ ]/g, '');
+            const directVehRes = await fetchJson(`/vehiculos?placas=${encodeURIComponent(validPlate)}&limit=1`);
+            expressSucceeded = true;
             const vList = Array.isArray(directVehRes)
               ? directVehRes
               : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
 
-            if (vList.length > 0) {
-              matchedVehiculo = vList[0];
-              const directCorbRes = await fetchJson(`/corbatines?id_vehiculo=${matchedVehiculo.id_vehiculo}&limit=1`).catch(() => null);
-              const cList = Array.isArray(directCorbRes)
-                ? directCorbRes
-                : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
-              matchedCorbatin = cList[0] || null;
+            const matchedV = vList.find((v: any) => {
+              if (!v?.placas) return false;
+              const vPlate = String(v.placas).toUpperCase().replace(/[-_ ]/g, '');
+              return vPlate === cleanTargetPlate || vPlate.includes(cleanTargetPlate) || cleanTargetPlate.includes(vPlate);
+            });
+
+            if (matchedV) {
+              matchedVehiculo = matchedV;
+              if (matchedVehiculo.corbatin) {
+                matchedCorbatin = matchedVehiculo.corbatin;
+              } else if (matchedVehiculo.corbatines && Array.isArray(matchedVehiculo.corbatines) && matchedVehiculo.corbatines.length > 0) {
+                matchedCorbatin = matchedVehiculo.corbatines.find((c: any) => c.estatus === 'activo' || c.estatus === 'ACTIVO') || matchedVehiculo.corbatines[0];
+              } else {
+                const directCorbRes = await fetchJson(`/corbatines?id_vehiculo=${matchedVehiculo.id_vehiculo}&limit=1`).catch(() => null);
+                const cList = Array.isArray(directCorbRes)
+                  ? directCorbRes
+                  : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
+                const matchedC = cList.find((c: any) => Number(c.id_vehiculo) === Number(matchedVehiculo.id_vehiculo));
+                if (matchedC) {
+                  matchedCorbatin = matchedC;
+                }
+              }
             }
           }
         }
@@ -548,66 +697,59 @@ export const ApiService = {
         // Fallback controlado
       }
 
-      // 4. Fallback Seguro sin descarga masiva de tablas (Cero Egress Masivo)
-      if (!matchedCorbatin || !matchedVehiculo) {
-        // 4.1 Búsqueda directa acotada en Supabase si está disponible (con proyección y limit=1)
+      // 3. Fallback Seguro en Supabase (Únicamente si la API Express no estuvo disponible/alcanzable)
+      if (!matchedCorbatin && !matchedVehiculo && !expressSucceeded) {
         if (isSupabaseConfigured()) {
           try {
             if (numbers.length > 0 && !matchedCorbatin) {
-              const { data: directCorb } = await supabase
+              const targetNum = numbers[0];
+              const { data: directCorb, error: corbErr } = await (supabase as any)
                 .from('corbatines')
                 .select(PROJECTIONS.CORBATINES_LIGHT)
-                .eq('numero', numbers[0])
+                .eq('numero', targetNum)
                 .limit(1);
 
-              if (directCorb && directCorb.length > 0) {
+              if (!corbErr && directCorb && directCorb.length > 0 && Number(directCorb[0].numero) === targetNum) {
                 matchedCorbatin = directCorb[0];
-                const { data: directVeh } = await supabase
-                  .from('vehiculos')
-                  .select(PROJECTIONS.VEHICULOS_LIGHT)
-                  .eq('id_vehiculo', matchedCorbatin.id_vehiculo)
-                  .limit(1);
-                if (directVeh && directVeh.length > 0) {
-                  matchedVehiculo = directVeh[0];
+                if (matchedCorbatin.id_vehiculo) {
+                  const { data: directVeh, error: vehErr } = await (supabase as any)
+                    .from('vehiculos')
+                    .select(PROJECTIONS.VEHICULOS_LIGHT)
+                    .eq('id_vehiculo', matchedCorbatin.id_vehiculo)
+                    .limit(1);
+                  if (!vehErr && directVeh && directVeh.length > 0) {
+                    matchedVehiculo = directVeh[0];
+                  }
                 }
               }
             }
 
             if (!matchedVehiculo && plates.length > 0) {
               const validPlate = plates.find((p) => p.length >= 3) || plates[0];
-              const { data: directVeh } = await supabase
+              const cleanPlate = validPlate.trim().toUpperCase();
+              const cleanPlateNoHyphen = cleanPlate.replace(/[-_ ]/g, '');
+              const candidatePlates = Array.from(new Set([cleanPlate, cleanPlateNoHyphen, validPlate]));
+
+              const { data: directVeh, error: vehErr } = await (supabase as any)
                 .from('vehiculos')
                 .select(PROJECTIONS.VEHICULOS_LIGHT)
-                .ilike('placas', `%${validPlate}%`)
+                .in('placas', candidatePlates)
                 .limit(1);
 
-              if (directVeh && directVeh.length > 0) {
+              if (!vehErr && directVeh && directVeh.length > 0) {
                 matchedVehiculo = directVeh[0];
-                const { data: directCorb } = await supabase
+                const { data: directCorb, error: corbErr } = await (supabase as any)
                   .from('corbatines')
                   .select(PROJECTIONS.CORBATINES_LIGHT)
                   .eq('id_vehiculo', matchedVehiculo.id_vehiculo)
+                  .eq('estatus', 'activo')
                   .limit(1);
-                matchedCorbatin = directCorb?.[0] || null;
+                if (!corbErr && directCorb && directCorb.length > 0) {
+                  matchedCorbatin = directCorb[0];
+                }
               }
             }
-          } catch {}
-        }
-
-        // 4.2 Si aún no se encuentra, verificar en datos previamente cacheados en memoria sin hacer peticiones nuevas
-        if (!matchedCorbatin || !matchedVehiculo) {
-          const cachedCorbs = apiCache.get<CorbatinRow[]>('corbatines_list', TTL_VEHICLES_CORBATINES) || [];
-          const cachedVehs = apiCache.get<VehiculoRow[]>('vehiculos_list', TTL_VEHICLES_CORBATINES) || [];
-
-          if (cachedCorbs.length > 0 && !matchedCorbatin) {
-            matchedCorbatin = cachedCorbs.find((c: any) => numbers.includes(Number(c.numero)));
-          }
-          if (cachedVehs.length > 0 && !matchedVehiculo) {
-            matchedVehiculo = cachedVehs.find((v: any) => {
-              const plateStr = String(v.placas || '').toUpperCase();
-              return plates.some((p) => plateStr.includes(p.toUpperCase()));
-            });
-          }
+          } catch { }
         }
       }
 
@@ -645,16 +787,18 @@ export const ApiService = {
         updated_at: matchedVehiculo?.updated_at || new Date().toISOString(),
       };
 
-      const empresaRow: EmpresaRow = matchedVehiculo?.empresa || {
-        id_empresa: matchedVehiculo?.id_empresa || 1,
-        razon_social: matchedVehiculo?.empresaNombre || 'Constructora y Mantenimiento Residencial',
-        responsable_nombre: 'Administración HOA',
-        telefono: '(638) 382-8000',
-        correo: 'contacto@hoa-laspalomas.com',
-        estatus: 'activa',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+      const empresaRow: EmpresaRow =
+        matchedVehiculo?.empresa ||
+        matchedVehiculo?.empresas || {
+          id_empresa: matchedVehiculo?.id_empresa || 1,
+          razon_social: matchedVehiculo?.empresaNombre || 'Constructora y Mantenimiento Residencial',
+          responsable_nombre: 'Administración HOA',
+          telefono: '(638) 382-8000',
+          correo: 'contacto@hoa-laspalomas.com',
+          estatus: 'activa',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
 
       // Conductor asignado
       let conductorPrincipal: TrabajadorRow | undefined = undefined;
@@ -672,7 +816,7 @@ export const ApiService = {
         };
       }
 
-      // Sanciones y conteo de infracciones optimizado (evita descargar 100 reportes completos)
+      // Sanciones y conteo de infracciones en paralelo sin cascada secuencial
       const [todasSanciones, totalInfracciones] = await Promise.all([
         this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
         this.getReportesCount({ idVehiculo: vehiculoRow.id_vehiculo }),
@@ -705,7 +849,27 @@ export const ApiService = {
         totalInfracciones,
       };
 
-      apiCache.set(lookupCacheKey, result);
+      // Guardar en almacenamiento persistente SOLO la clave canónica principal
+      apiCache.set(primaryKey, result);
+
+      // Los alias y búsquedas secundarias se mapean únicamente en memoria RAM (0ms y 0 I/O bloqueante a disco/localStorage)
+      for (const key of aliasKeys) {
+        if (key !== primaryKey) {
+          apiCache.setMemoryOnly(key, result);
+        }
+      }
+      if (vehiculoRow.id_vehiculo) {
+        apiCache.setMemoryOnly(`lookup_veh_${vehiculoRow.id_vehiculo}`, result);
+      }
+      if (corbatinRow.numero) {
+        apiCache.setMemoryOnly(`lookup_num_${corbatinRow.numero}`, result);
+      }
+      if (vehiculoRow.placas && vehiculoRow.placas !== 'SIN-PLACA') {
+        const cleanP = vehiculoRow.placas.toUpperCase().replace(/[-_ ]/g, '');
+        apiCache.setMemoryOnly(`lookup_plate_${cleanP}`, result);
+        apiCache.setMemoryOnly(`lookup_plate_${vehiculoRow.placas.toUpperCase()}`, result);
+      }
+
       return result;
     } catch (e) {
       console.warn('[ApiService] Error en buscarCorbatin:', e);
@@ -714,7 +878,7 @@ export const ApiService = {
   },
 
   /**
-   * Busca un vehículo por su placa
+   * Busca un vehículo por su placa (delega a la búsqueda unificada)
    */
   async buscarVehiculoPorPlaca(placa: string): Promise<CorbatinLookupResult | null> {
     return this.buscarCorbatin(placa);
@@ -818,6 +982,7 @@ export const ApiService = {
               activo: r.activo ?? true,
             }));
           }
+
         } catch {
           if (isSupabaseConfigured()) {
             const { data } = await supabase
@@ -837,7 +1002,7 @@ export const ApiService = {
   },
 
   /**
-   * Registra un nuevo reporte de infracción e invalida selectivamente las cachés de reportes
+   * Registra un nuevo reporte de infracción e invalida selectivamente las cachés afectadas
    */
   async crearReporteInfraccion(params: {
     idVehiculo: number;
@@ -862,10 +1027,22 @@ export const ApiService = {
         }),
       });
 
-      // Invalidación selectiva de cachés
-      apiCache.invalidate('reportes');
-      apiCache.invalidate('lookup_');
-      apiCache.invalidate('sanciones');
+      // Invalidación selectiva y granular: preserva las consultas de otros vehículos en caché
+      apiCache.invalidate('reportes_list');
+      apiCache.invalidate('reportes_count_all');
+
+      if (params.idVehiculo) {
+        apiCache.invalidate(`lookup_veh_${params.idVehiculo}`);
+        apiCache.invalidate(`reportes_count_${params.idVehiculo}`);
+        apiCache.invalidate(`sanciones_list_${params.idVehiculo}`);
+      }
+      if (params.idCorbatin) {
+        apiCache.invalidate(`lookup_num_${params.idCorbatin}`);
+      }
+      if (params.idUsuario) {
+        apiCache.invalidate(`reportes_list_${params.idUsuario}`);
+        apiCache.invalidate(`reportes_count_all_${params.idUsuario}`);
+      }
 
       if (res && res.id_reporte) {
         return { idReporte: res.id_reporte };
@@ -898,12 +1075,15 @@ export const ApiService = {
         apiCache.set(cacheKey, res.count);
         return res.count;
       }
-      if (Array.isArray(res)) {
-        apiCache.set(cacheKey, res.length);
-        return res.length;
+      if (typeof res?.total === 'number') {
+        apiCache.set(cacheKey, res.total);
+        return res.total;
       }
-    } catch {
-      if (isSupabaseConfigured()) {
+    } catch { }
+
+    // Fallback Egress = 0 bytes (solicitud HEAD con conteo exacto en headers de Supabase)
+    if (isSupabaseConfigured()) {
+      try {
         const count = await getCountOptimized(
           'reportes_infracciones',
           idVehiculo ? 'id_vehiculo' : idUsuario ? 'id_usuario' : undefined,
@@ -911,7 +1091,7 @@ export const ApiService = {
         );
         apiCache.set(cacheKey, count);
         return count;
-      }
+      } catch { }
     }
 
     return 0;
@@ -923,11 +1103,11 @@ export const ApiService = {
   async getReportes(
     options?:
       | {
-          idUsuario?: number;
-          idVehiculo?: number;
-          limit?: number;
-          forceRefresh?: boolean;
-        }
+        idUsuario?: number;
+        idVehiculo?: number;
+        limit?: number;
+        forceRefresh?: boolean;
+      }
       | number
   ): Promise<any[]> {
     let idUsuario: number | undefined;
@@ -1064,7 +1244,7 @@ export const ApiService = {
         if (Array.isArray(data)) {
           return data;
         }
-      } catch {}
+      } catch { }
       return [];
     });
   },
@@ -1151,7 +1331,7 @@ export const ApiService = {
         if (Array.isArray(data)) {
           return data;
         }
-      } catch {}
+      } catch { }
       return [];
     });
   },

@@ -88,7 +88,7 @@ export async function getCountOptimized(
   try {
     let query = (supabase as any)
       .from(table)
-      .select('id', { count: 'exact', head: true });
+      .select('*', { count: 'exact', head: true });
 
     if (filterColumn && filterValue !== undefined) {
       query = query.eq(filterColumn, filterValue);
