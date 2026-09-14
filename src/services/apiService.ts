@@ -52,6 +52,7 @@ export interface CorbatinLookupResult {
   conductorPrincipal?: TrabajadorRow;
   sancionesActivas: SancionDbRow[];
   totalInfracciones: number;
+  ultimoAcceso?: BitacoraAccesoRow | null;
 }
 
 // Caché de ETags HTTP para respuestas 304 Not Modified (0 bytes de payload de red)
@@ -286,6 +287,56 @@ const TTL_USERS = 15 * 60 * 1000;                 // 15 minutos para usuarios
 const TTL_VEHICLES_CORBATINES = 5 * 60 * 1000;    // 5 minutos para listas acotadas
 const TTL_LOOKUPS = 5 * 60 * 1000;               // 5 minutos para resultados de búsqueda específicos
 const TTL_REPORTES = 2 * 60 * 1000;              // 2 minutos para reportes del oficial
+
+export const getLocalDateStr = (d = new Date()): string => {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+export const getLocalTimeStr = (d = new Date()): string => {
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const seconds = String(d.getSeconds()).padStart(2, '0');
+  return `${hours}:${minutes}:${seconds}`;
+};
+
+export const parseUtcTimestampToLocalTimeStr = (
+  isoTimestamp?: string | null,
+  fallbackTimeStr?: string | null
+): string | null => {
+  const val = isoTimestamp || fallbackTimeStr;
+  if (!val || typeof val !== 'string') return null;
+  const clean = val.trim();
+  if (!clean || clean === 'null' || clean === 'undefined') return null;
+
+  // 1. Si es timestamp con fecha ("2026-09-14 18:59:37.272" o "2026-09-14T18:59:37Z")
+  const dateMatch = clean.match(/(?:T|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (dateMatch) {
+    const utcHour = parseInt(dateMatch[1], 10);
+    const min = dateMatch[2];
+    const sec = dateMatch[3] || '00';
+    let localHour = utcHour - 7;
+    if (localHour < 0) localHour += 24;
+    localHour = localHour % 24;
+    return `${String(localHour).padStart(2, '0')}:${min}:${sec}`;
+  }
+
+  // 2. Si es una hora directa UTC de base de datos ("18:59:00" o "18:59:37.272")
+  const directMatch = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (directMatch) {
+    const utcHour = parseInt(directMatch[1], 10);
+    const min = directMatch[2];
+    const sec = directMatch[3] || '00';
+    let localHour = utcHour - 7;
+    if (localHour < 0) localHour += 24;
+    localHour = localHour % 24;
+    return `${String(localHour).padStart(2, '0')}:${min}:${sec}`;
+  }
+
+  return clean;
+};
 
 export const ApiService = {
   /**
@@ -562,7 +613,7 @@ export const ApiService = {
   },
 
   /**
-   * Genera las claves de caché canónicas y alias para búsqueda unificada
+   * Obtiene la clave canónica principal y los alias de búsqueda para un término dado
    */
   getCanonicalLookupKeys(param: string): {
     primaryKey: string;
@@ -571,8 +622,27 @@ export const ApiService = {
     tokens: string[];
     plates: string[];
   } {
-    const { numbers, tokens, plates } = this.extractSearchTokens(param);
+    const rawTokens = (param || '')
+      .split(/[\s,;|/]+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    const tokens = rawTokens.length > 0 ? rawTokens : [(param || '').trim()].filter(Boolean);
+    const numbers: number[] = [];
+    const plates: string[] = [];
     const aliasKeys: string[] = [];
+
+    for (const token of tokens) {
+      const matchNum = token.match(/\b\d+\b/);
+      if (matchNum) {
+        numbers.push(parseInt(matchNum[0], 10));
+      }
+
+      const cleanAlnum = token.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+      if (cleanAlnum.length >= 3 && /[a-zA-Z]/.test(cleanAlnum) && /\d/.test(cleanAlnum)) {
+        plates.push(cleanAlnum);
+      }
+    }
 
     let primaryKey = '';
     if (numbers.length > 0) {
@@ -617,7 +687,11 @@ export const ApiService = {
       const { primaryKey, aliasKeys, numbers, plates } = this.getCanonicalLookupKeys(cleanParam);
       for (const key of aliasKeys) {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
-        if (cachedResult) {
+        if (cachedResult && cachedResult.vehiculo) {
+          // El vehículo y corbatín son estáticos (ahorro masivo de egress),
+          // pero el último acceso vehicular siempre se consulta en vivo
+          const liveAcceso = await this.getUltimoAcceso(cachedResult.vehiculo.id_vehiculo);
+          cachedResult.ultimoAcceso = liveAcceso || null;
           return cachedResult;
         }
       }
@@ -816,10 +890,11 @@ export const ApiService = {
         };
       }
 
-      // Sanciones y conteo de infracciones en paralelo sin cascada secuencial
-      const [todasSanciones, totalInfracciones] = await Promise.all([
+      // Sanciones, conteo de infracciones y último acceso vehicular en paralelo
+      const [todasSanciones, totalInfracciones, ultimoAcceso] = await Promise.all([
         this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
         this.getReportesCount({ idVehiculo: vehiculoRow.id_vehiculo }),
+        this.getUltimoAcceso(vehiculoRow.id_vehiculo),
       ]);
 
       const sancionesActivas = (todasSanciones || [])
@@ -847,6 +922,7 @@ export const ApiService = {
         conductorPrincipal,
         sancionesActivas,
         totalInfracciones,
+        ultimoAcceso: ultimoAcceso || null,
       };
 
       // Guardar en almacenamiento persistente SOLO la clave canónica principal
@@ -1014,18 +1090,79 @@ export const ApiService = {
     evidenciasUrls?: string[];
   }): Promise<{ idReporte: number } | null> {
     try {
-      const res = await fetchJson('/reportes', {
-        method: 'POST',
-        body: JSON.stringify({
-          id_vehiculo: params.idVehiculo,
-          id_corbatin: params.idCorbatin || null,
-          id_infraccion: params.idInfraccion,
-          id_usuario: params.idUsuario,
-          ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
-          descripcion_hechos: params.descripcionHechos,
-          evidencia_url: params.evidenciasUrls?.[0] || null,
-        }),
-      });
+      const now = new Date();
+      // Calcular nivel de reincidencia con la cuenta local/cacheada existente (0 bytes egress adicional)
+      const prevCount = await this.getReportesCount({ idVehiculo: params.idVehiculo }).catch(() => 0);
+      const nuevoNivel = prevCount + 1;
+      let fechaFinStr: string | null = null;
+      if (nuevoNivel === 1) {
+        fechaFinStr = now.toISOString(); // 1ª Falta: Llamado de atención
+      } else if (nuevoNivel === 2) {
+        fechaFinStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(); // 2ª Falta: 24 horas
+      } else if (nuevoNivel === 3) {
+        fechaFinStr = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 3ª Falta: 7 días
+      } else {
+        fechaFinStr = null; // 4ª Falta: Permanente
+      }
+
+      let resReporteId: number | null = null;
+
+      try {
+        const res = await fetchJson('/reportes', {
+          method: 'POST',
+          body: JSON.stringify({
+            id_vehiculo: params.idVehiculo,
+            id_corbatin: params.idCorbatin || null,
+            id_infraccion: params.idInfraccion,
+            id_usuario: params.idUsuario,
+            ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
+            descripcion_hechos: params.descripcionHechos,
+            evidencia_url: params.evidenciasUrls?.[0] || null,
+            numero_reincidencia: nuevoNivel,
+            fecha_fin: fechaFinStr,
+          }),
+        });
+        if (res && res.id_reporte) {
+          resReporteId = res.id_reporte;
+        }
+      } catch {}
+
+      // Fallback Supabase si no hubo respuesta del servidor Express
+      if (!resReporteId && isSupabaseConfigured()) {
+        try {
+          const { data: repData } = await (supabase as any)
+            .from('reportes_infracciones')
+            .insert({
+              id_vehiculo: params.idVehiculo,
+              id_corbatin: params.idCorbatin || null,
+              id_infraccion: params.idInfraccion,
+              id_usuario: params.idUsuario,
+              ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
+              descripcion_hechos: params.descripcionHechos,
+              estatus_revision: 'aprobada',
+            })
+            .select('id_reporte')
+            .single();
+
+          if (repData && repData.id_reporte) {
+            resReporteId = repData.id_reporte;
+            await (supabase as any)
+              .from('sanciones')
+              .insert({
+                id_reporte: repData.id_reporte,
+                id_vehiculo: params.idVehiculo,
+                id_empresa: 1,
+                id_regla: nuevoNivel <= 4 ? nuevoNivel : 4,
+                numero_reincidencia: nuevoNivel,
+                fecha_inicio: now.toISOString(),
+                fecha_fin: fechaFinStr,
+                estatus: 'activa',
+                motivo: params.descripcionHechos || 'Infracción reglamentaria',
+                id_usuario: params.idUsuario,
+              });
+          }
+        } catch {}
+      }
 
       // Invalidación selectiva y granular: preserva las consultas de otros vehículos en caché
       apiCache.invalidate('reportes_list');
@@ -1044,8 +1181,8 @@ export const ApiService = {
         apiCache.invalidate(`reportes_count_all_${params.idUsuario}`);
       }
 
-      if (res && res.id_reporte) {
-        return { idReporte: res.id_reporte };
+      if (resReporteId) {
+        return { idReporte: resReporteId };
       }
       return null;
     } catch (e) {
@@ -1139,6 +1276,9 @@ export const ApiService = {
 
           const data = await fetchJson(`/reportes${queryString}`);
           if (Array.isArray(data)) {
+            if (idVehiculo) {
+              return data.filter((r: any) => Number(r.id_vehiculo) === Number(idVehiculo));
+            }
             return data;
           }
         } catch {
@@ -1167,6 +1307,355 @@ export const ApiService = {
   },
 
   /**
+   * Obtiene el último registro de acceso para un vehículo en particular
+   */
+  async getUltimoAcceso(idVehiculo: number): Promise<BitacoraAccesoRow | null> {
+    if (!idVehiculo) return null;
+    const cacheKey = `ultimo_acceso_veh_${idVehiculo}`;
+    const cached = apiCache.get<BitacoraAccesoRow>(cacheKey, 3 * 1000);
+    if (cached !== null && cached !== undefined) {
+      if (Number(cached.id_vehiculo) === Number(idVehiculo)) {
+        return cached;
+      }
+      apiCache.invalidate(cacheKey);
+    }
+
+    // 1. Almacenamiento local en memoria reciente
+    let localAcceso: BitacoraAccesoRow | null = null;
+    try {
+      const localMapStr = safeStorage.getItem('hoa_local_bitacora_map');
+      if (localMapStr) {
+        const map = JSON.parse(localMapStr);
+        const entry = map ? (map[String(idVehiculo)] || map[idVehiculo]) : null;
+        if (entry && Number(entry.id_vehiculo) === Number(idVehiculo)) {
+          localAcceso = entry;
+        }
+      }
+    } catch {}
+
+    // 2. Consultar servidor Express
+    try {
+      const res = await fetchJson(`/bitacora?id_vehiculo=${idVehiculo}&limit=1`);
+      const list = Array.isArray(res) ? res : res?.accesos || (res?.id_acceso ? [res] : []);
+      // FILTRADO ESTRICTO: Solo aceptar el registro si realmente pertenece a idVehiculo
+      const matchedRow = list.find((r: any) => Number(r.id_vehiculo) === Number(idVehiculo));
+      if (matchedRow) {
+        const horaEntrada = parseUtcTimestampToLocalTimeStr(
+          matchedRow.hora_entrada,
+          matchedRow.created_at
+        );
+        const horaSalida = (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
+          ? parseUtcTimestampToLocalTimeStr(
+              matchedRow.hora_salida,
+              matchedRow.updated_at || matchedRow.created_at
+            )
+          : null;
+
+        const mapped: BitacoraAccesoRow = {
+          id_acceso: matchedRow.id_acceso,
+          id_caseta: matchedRow.id_caseta || 1,
+          id_vehiculo: matchedRow.id_vehiculo,
+          id_corbatin: matchedRow.id_corbatin || null,
+          id_conductor: matchedRow.id_conductor || null,
+          id_usuario: matchedRow.id_usuario || 1,
+          fecha: matchedRow.fecha || (matchedRow.created_at || '').split('T')[0] || getLocalDateStr(),
+          hora_entrada: horaEntrada,
+          hora_salida: horaSalida,
+          ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
+          estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (horaSalida ? 'salida' : 'permitido'),
+          motivo_rechazo: matchedRow.motivo_rechazo || null,
+          observaciones: matchedRow.observaciones || null,
+          created_at: matchedRow.created_at || new Date().toISOString(),
+          updated_at: matchedRow.updated_at || new Date().toISOString(),
+        };
+
+        apiCache.set(cacheKey, mapped);
+        return mapped;
+      }
+    } catch {}
+
+    // 3. Supabase Fallback
+    if (isSupabaseConfigured()) {
+      try {
+        const { data, error } = await (supabase as any)
+          .from('bitacora_accesos')
+          .select(PROJECTIONS.BITACORA_LIGHT)
+          .eq('id_vehiculo', idVehiculo)
+          .order('id_acceso', { ascending: false })
+          .limit(1);
+
+        if (!error && data && data.length > 0) {
+          const matchedRow = data.find((r: any) => Number(r.id_vehiculo) === Number(idVehiculo)) || (Number(data[0].id_vehiculo) === Number(idVehiculo) ? data[0] : null);
+          if (matchedRow) {
+            const horaEntrada = parseUtcTimestampToLocalTimeStr(
+              matchedRow.hora_entrada,
+              matchedRow.created_at
+            );
+            const horaSalida = (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
+              ? parseUtcTimestampToLocalTimeStr(
+                  matchedRow.hora_salida,
+                  matchedRow.updated_at || matchedRow.created_at
+                )
+              : null;
+
+            const mapped: BitacoraAccesoRow = {
+              id_acceso: matchedRow.id_acceso,
+              id_caseta: matchedRow.id_caseta || 1,
+              id_vehiculo: matchedRow.id_vehiculo,
+              id_corbatin: matchedRow.id_corbatin || null,
+              id_conductor: matchedRow.id_conductor || null,
+              id_usuario: matchedRow.id_usuario || 1,
+              fecha: matchedRow.fecha || (matchedRow.created_at || '').split('T')[0] || getLocalDateStr(),
+              hora_entrada: horaEntrada,
+              hora_salida: horaSalida,
+              ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
+              estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (horaSalida ? 'salida' : 'permitido'),
+              motivo_rechazo: matchedRow.motivo_rechazo || null,
+              observaciones: matchedRow.observaciones || null,
+              created_at: matchedRow.created_at || new Date().toISOString(),
+              updated_at: matchedRow.updated_at || new Date().toISOString(),
+            };
+
+            apiCache.set(cacheKey, mapped);
+            return mapped;
+          }
+        }
+      } catch {}
+    }
+
+    // 4. Si el backend no devolvió filas pero hay registro local
+    if (localAcceso && Number(localAcceso.id_vehiculo) === Number(idVehiculo)) {
+      return localAcceso;
+    }
+
+    return null;
+  },
+
+  /**
+   * Registra una nueva entrada de vehículo en la bitácora
+   */
+  async registrarEntradaVehiculo(params: {
+    idVehiculo: number;
+    idCorbatin?: number | null;
+    idConductor?: number | null;
+    idUsuario: number;
+    idCaseta?: number;
+    ubicacionTrabajo?: string;
+    observaciones?: string;
+  }): Promise<{ success: boolean; acceso?: BitacoraAccesoRow }> {
+    const now = new Date();
+    const fechaStr = getLocalDateStr(now);
+    const utcIsoStr = now.toISOString();
+
+    const newAcceso: BitacoraAccesoRow = {
+      id_acceso: Date.now(),
+      id_caseta: params.idCaseta || 1,
+      id_vehiculo: params.idVehiculo,
+      id_corbatin: params.idCorbatin || null,
+      id_conductor: params.idConductor || null,
+      id_usuario: params.idUsuario,
+      fecha: fechaStr,
+      hora_entrada: utcIsoStr,
+      hora_salida: null,
+      ubicacion_trabajo: params.ubicacionTrabajo || 'Caseta Principal',
+      estatus_acceso: 'permitido',
+      motivo_rechazo: null,
+      observaciones: params.observaciones || 'Entrada registrada en caseta.',
+      created_at: utcIsoStr,
+      updated_at: utcIsoStr,
+    };
+
+    // 1. Guardar en almacenamiento local para respuesta instantánea
+    try {
+      let map: Record<string, BitacoraAccesoRow> = {};
+      const localMapStr = safeStorage.getItem('hoa_local_bitacora_map');
+      if (localMapStr) {
+        map = JSON.parse(localMapStr) || {};
+      }
+      map[String(params.idVehiculo)] = newAcceso;
+      safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
+    } catch {}
+
+    // Invalidar únicamente la caché del último acceso de este vehículo (preserva catálogos de vehículos en RAM)
+    apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
+    const cachedLookupVeh = apiCache.get<CorbatinLookupResult>(`lookup_veh_${params.idVehiculo}`, TTL_LOOKUPS);
+    if (cachedLookupVeh) {
+      cachedLookupVeh.ultimoAcceso = newAcceso;
+    }
+    if (params.idCorbatin) {
+      const cachedLookupNum = apiCache.get<CorbatinLookupResult>(`lookup_num_${params.idCorbatin}`, TTL_LOOKUPS);
+      if (cachedLookupNum) {
+        cachedLookupNum.ultimoAcceso = newAcceso;
+      }
+    }
+
+    // 2. Enviar a Express Backend
+    try {
+      const res = await fetchJson('/bitacora', {
+        method: 'POST',
+        body: JSON.stringify({
+          id_caseta: params.idCaseta || 1,
+          id_vehiculo: params.idVehiculo,
+          id_corbatin: params.idCorbatin || null,
+          id_conductor: params.idConductor || null,
+          id_usuario: params.idUsuario,
+          fecha: fechaStr,
+          hora_entrada: utcIsoStr,
+          ubicacion_trabajo: params.ubicacionTrabajo || 'Caseta Principal',
+          estatus_acceso: 'PERMITIDO',
+          observaciones: params.observaciones || null,
+        }),
+      });
+      if (res && res.id_acceso) {
+        newAcceso.id_acceso = res.id_acceso;
+        try {
+          const map = JSON.parse(safeStorage.getItem('hoa_local_bitacora_map') || '{}');
+          map[String(params.idVehiculo)] = newAcceso;
+          safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
+        } catch {}
+      }
+    } catch {
+      // 3. Fallback a Supabase
+      if (isSupabaseConfigured()) {
+        try {
+          const { data } = await (supabase as any)
+            .from('bitacora_accesos')
+            .insert({
+              id_caseta: params.idCaseta || 1,
+              id_vehiculo: params.idVehiculo,
+              id_corbatin: params.idCorbatin || null,
+              id_conductor: params.idConductor || null,
+              id_usuario: params.idUsuario,
+              fecha: fechaStr,
+              hora_entrada: utcIsoStr,
+              ubicacion_trabajo: params.ubicacionTrabajo || 'Caseta Principal',
+              estatus_acceso: 'permitido',
+              observaciones: params.observaciones || null,
+            })
+            .select('id_acceso')
+            .single();
+
+          if (data && data.id_acceso) {
+            newAcceso.id_acceso = data.id_acceso;
+            try {
+              const map = JSON.parse(safeStorage.getItem('hoa_local_bitacora_map') || '{}');
+              map[String(params.idVehiculo)] = newAcceso;
+              safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
+            } catch {}
+          }
+        } catch {}
+      }
+    }
+
+    return { success: true, acceso: newAcceso };
+  },
+
+  /**
+   * Registra la salida de un vehículo en la bitácora
+   */
+  async registrarSalidaVehiculo(params: {
+    idAcceso?: number;
+    idVehiculo: number;
+    idUsuario: number;
+    idCaseta?: number;
+    idCorbatin?: number | null;
+    observaciones?: string;
+  }): Promise<{ success: boolean; horaSalida: string }> {
+    const now = new Date();
+    const fechaStr = getLocalDateStr(now);
+    const utcIsoStr = now.toISOString();
+
+    // 1. Actualizar mapa local inmediatamente
+    let updatedAcceso: BitacoraAccesoRow | null = null;
+    try {
+      let map: Record<string, BitacoraAccesoRow> = {};
+      const localMapStr = safeStorage.getItem('hoa_local_bitacora_map');
+      if (localMapStr) {
+        map = JSON.parse(localMapStr) || {};
+      }
+      const existing = map[String(params.idVehiculo)];
+      updatedAcceso = {
+        id_acceso: existing?.id_acceso || params.idAcceso || Date.now(),
+        id_caseta: params.idCaseta || existing?.id_caseta || 1,
+        id_vehiculo: params.idVehiculo,
+        id_corbatin: params.idCorbatin || existing?.id_corbatin || null,
+        id_conductor: existing?.id_conductor || null,
+        id_usuario: params.idUsuario,
+        fecha: existing?.fecha || fechaStr,
+        hora_entrada: existing?.hora_entrada || null,
+        hora_salida: utcIsoStr,
+        ubicacion_trabajo: existing?.ubicacion_trabajo || null,
+        estatus_acceso: 'salida',
+        motivo_rechazo: null,
+        observaciones: params.observaciones || 'Salida registrada en caseta.',
+        created_at: existing?.created_at || utcIsoStr,
+        updated_at: utcIsoStr,
+      };
+      map[String(params.idVehiculo)] = updatedAcceso;
+      safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
+    } catch {}
+
+    // Invalidar únicamente la clave de último acceso (sin purgar lookup_ global)
+    apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
+    const cachedLookupVeh = apiCache.get<CorbatinLookupResult>(`lookup_veh_${params.idVehiculo}`, TTL_LOOKUPS);
+    if (cachedLookupVeh && updatedAcceso) {
+      cachedLookupVeh.ultimoAcceso = updatedAcceso;
+    }
+    if (params.idCorbatin && updatedAcceso) {
+      const cachedLookupNum = apiCache.get<CorbatinLookupResult>(`lookup_num_${params.idCorbatin}`, TTL_LOOKUPS);
+      if (cachedLookupNum) {
+        cachedLookupNum.ultimoAcceso = updatedAcceso;
+      }
+    }
+
+    // 2. Intentar actualizar en Express Backend mediante POST /bitacora
+    try {
+      await fetchJson('/bitacora', {
+        method: 'POST',
+        body: JSON.stringify({
+          id_caseta: params.idCaseta || 1,
+          id_vehiculo: params.idVehiculo,
+          id_corbatin: params.idCorbatin || null,
+          id_usuario: params.idUsuario,
+          fecha: fechaStr,
+          hora_salida: utcIsoStr,
+          estatus_acceso: 'SALIDA',
+          observaciones: params.observaciones || 'Salida registrada en caseta.',
+        }),
+      });
+    } catch {}
+
+    // 3. Fallback en Supabase (un solo salto de red sin SELECTs previos)
+    if (isSupabaseConfigured()) {
+      try {
+        if (params.idAcceso && params.idAcceso > 0 && params.idAcceso < 1000000000000) {
+          await (supabase as any)
+            .from('bitacora_accesos')
+            .update({
+              hora_salida: utcIsoStr,
+              estatus_acceso: 'salida',
+              updated_at: utcIsoStr,
+            })
+            .eq('id_acceso', params.idAcceso);
+        } else {
+          // Actualización directa en una sola instrucción SQL/REST
+          await (supabase as any)
+            .from('bitacora_accesos')
+            .update({
+              hora_salida: utcIsoStr,
+              estatus_acceso: 'salida',
+              updated_at: utcIsoStr,
+            })
+            .eq('id_vehiculo', params.idVehiculo)
+            .is('hora_salida', null);
+        }
+      } catch {}
+    }
+
+    return { success: true, horaSalida: utcIsoStr };
+  },
+
+  /**
    * Registra un evento en la bitácora de accesos
    */
   async registrarAccesoBitacora(params: {
@@ -1187,6 +1676,10 @@ export const ApiService = {
         salida: 'SALIDA',
         forzado: 'FORZADO',
       };
+      const now = new Date();
+      const fechaStr = getLocalDateStr(now);
+      const horaStr = getLocalTimeStr(now);
+      const localTimestampStr = `${fechaStr} ${horaStr}`;
 
       await fetchJson('/bitacora', {
         method: 'POST',
@@ -1196,6 +1689,8 @@ export const ApiService = {
           id_corbatin: params.idCorbatin || null,
           id_conductor: params.idConductor || null,
           id_usuario: params.idUsuario,
+          fecha: fechaStr,
+          hora_entrada: localTimestampStr,
           ubicacion_trabajo: params.ubicacionTrabajo || null,
           estatus_acceso: estatusMap[params.estatusAcceso] || 'PERMITIDO',
           motivo_rechazo: params.motivoRechazo || null,
@@ -1300,6 +1795,9 @@ export const ApiService = {
           const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}&limit=20` : '?limit=20';
           const data = await fetchJson(`/sanciones${queryParam}`);
           if (Array.isArray(data)) {
+            if (idVehiculo) {
+              return data.filter((s: any) => Number(s.id_vehiculo) === Number(idVehiculo));
+            }
             return data;
           }
         } catch {

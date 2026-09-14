@@ -74,6 +74,7 @@ export const PROJECTIONS = {
   VEHICULOS_LIGHT: 'id_vehiculo, id_empresa, marca, modelo, año, placas, color, foto_url, estatus_acceso',
   CORBATINES_LIGHT: 'id_corbatin, id_vehiculo, numero, qr_token, fecha_emision, fecha_vencimiento, estatus',
   SANCIONES_LIGHT: 'id_sancion, id_reporte, id_vehiculo, id_empresa, id_regla, numero_reincidencia, fecha_inicio, fecha_fin, estatus, motivo',
+  BITACORA_LIGHT: 'id_acceso, id_caseta, id_vehiculo, id_corbatin, id_conductor, id_usuario, fecha, hora_entrada, hora_salida, estatus_acceso',
   REPORTES_COUNT_ONLY: 'id_reporte',
 } as const;
 
@@ -88,7 +89,8 @@ export async function getCountOptimized(
   try {
     let query = (supabase as any)
       .from(table)
-      .select('*', { count: 'exact', head: true });
+      .select('*', { count: 'exact' })
+      .limit(0);
 
     if (filterColumn && filterValue !== undefined) {
       query = query.eq(filterColumn, filterValue);

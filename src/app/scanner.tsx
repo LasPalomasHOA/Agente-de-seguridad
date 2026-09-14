@@ -12,7 +12,6 @@ import {
   Modal,
   Platform,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMobile } from '../context/MobileContext';
 import { ThemedText } from '@/components/themed-text';
@@ -23,7 +22,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
 import { Select } from '../components/ui/select';
 import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
-import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow } from '../types/database';
+import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow, BitacoraAccesoRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 
@@ -49,11 +48,38 @@ const INFRACTION_CATEGORIES = [
   { id: 'escombros', name: 'Escombros/Basura', icon: 'trash-outline', defaultCode: 'INF-06' },
 ];
 
+const formatHora = (timeStr?: string | null): string | null => {
+  if (!timeStr || typeof timeStr !== 'string') return null;
+  const clean = timeStr.trim();
+  if (!clean || clean === 'null' || clean === 'undefined') return null;
+
+  // 1. Si es formato timestamp con fecha ("2026-09-14 19:10:48.884" o "2026-09-14T19:10:48Z")
+  const dateMatch = clean.match(/(?:T|\s)(\d{1,2}):(\d{2})/);
+  if (dateMatch) {
+    const utcHour = parseInt(dateMatch[1], 10);
+    const min = dateMatch[2];
+    let localHour = utcHour - 7;
+    if (localHour < 0) localHour += 24;
+    localHour = localHour % 24;
+    return `${String(localHour).padStart(2, '0')}:${min}`;
+  }
+
+  // 2. Si ya es una hora directa convertida ("12:10:48" o "12:10")
+  const directMatch = clean.match(/^(\d{1,2}):(\d{2})/);
+  if (directMatch) {
+    const hh = directMatch[1].padStart(2, '0');
+    const mm = directMatch[2];
+    return `${hh}:${mm}`;
+  }
+
+  return null;
+};
+
 export default function ScannerScreen() {
   const params = useLocalSearchParams();
   const router = useRouter();
   const theme = useTheme();
-  const { agregarReporte, catalogoInfracciones } = useMobile();
+  const { agregarReporte, catalogoInfracciones, agenteActual } = useMobile();
 
   // Navigation / Mode states
   const [mode, setMode] = useState<Mode>('camera');
@@ -63,6 +89,14 @@ export default function ScannerScreen() {
   const [selectedEmpresa, setSelectedEmpresa] = useState<EmpresaRow | null>(null);
   const [selectedConductor, setSelectedConductor] = useState<TrabajadorRow | null>(null);
   const [sancionesActivas, setSancionesActivas] = useState<SancionDbRow[]>([]);
+  const [ultimoAcceso, setUltimoAcceso] = useState<BitacoraAccesoRow | null>(null);
+  const [actionLoading, setActionLoading] = useState<boolean>(false);
+  const [exitSuccessModal, setExitSuccessModal] = useState<{
+    visible: boolean;
+    horaSalida?: string;
+    horaEntrada?: string;
+    duracion?: string;
+  } | null>(null);
 
   // Camera & Permissions states
   const [permission, requestPermission] = useCameraPermissions();
@@ -100,6 +134,113 @@ export default function ScannerScreen() {
     }
   }, [catalogoInfracciones, selectedInfraccion]);
 
+  const isAccesoToday = React.useMemo(() => {
+    if (!ultimoAcceso) return false;
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const todayStr = `${year}-${month}-${day}`;
+
+    const fechaStr =
+      ultimoAcceso.fecha ||
+      (ultimoAcceso.created_at ? ultimoAcceso.created_at.split('T')[0] : '');
+
+    return !!fechaStr && fechaStr.startsWith(todayStr);
+  }, [ultimoAcceso]);
+
+  const isVehicleInside = React.useMemo(() => {
+    if (!ultimoAcceso || !isAccesoToday) return false;
+    const hasEntered = !!ultimoAcceso.hora_entrada;
+    const hasNotExited = !ultimoAcceso.hora_salida && ultimoAcceso.estatus_acceso !== 'salida';
+    return hasEntered && hasNotExited;
+  }, [ultimoAcceso, isAccesoToday]);
+
+  const tiempoEstancia = React.useMemo(() => {
+    if (!ultimoAcceso?.hora_entrada) return '';
+    const timeVal = formatHora(ultimoAcceso.hora_entrada);
+    if (!timeVal) return '';
+
+    try {
+      const parts = timeVal.split(':');
+      if (parts.length >= 2) {
+        const entryHour = parseInt(parts[0], 10);
+        const entryMin = parseInt(parts[1], 10);
+        const now = new Date();
+        const currentHour = now.getHours();
+        const currentMin = now.getMinutes();
+
+        let totalMinutes = (currentHour * 60 + currentMin) - (entryHour * 60 + entryMin);
+        // Si cruzó la medianoche
+        if (totalMinutes < 0) totalMinutes += 24 * 60;
+        if (totalMinutes < 1) return 'Menos de 1 min';
+        const hrs = Math.floor(totalMinutes / 60);
+        const mins = totalMinutes % 60;
+        if (hrs > 0) return `${hrs}h ${mins}m`;
+        return `${mins} min`;
+      }
+    } catch {}
+    return '';
+  }, [ultimoAcceso]);
+
+  const handleMarcarSalida = async () => {
+    if (!selectedVehicle) return;
+    setActionLoading(true);
+    try {
+      const officerId = parseInt(agenteActual?.id?.replace(/\D/g, '') || '1', 10) || 1;
+      const res = await SupabaseService.registrarSalidaVehiculo({
+        idAcceso: ultimoAcceso?.id_acceso,
+        idVehiculo: selectedVehicle.id_vehiculo,
+        idUsuario: officerId,
+        idCorbatin: selectedCorbatin?.id_corbatin,
+      });
+
+      if (res && res.success) {
+        const salidaFmt = formatHora(res.horaSalida) || res.horaSalida.substring(0, 5);
+        const entradaFmt = formatHora(ultimoAcceso?.hora_entrada) || undefined;
+        setExitSuccessModal({
+          visible: true,
+          horaSalida: salidaFmt,
+          horaEntrada: entradaFmt,
+          duracion: tiempoEstancia || 'Estancia concluida',
+        });
+        setUltimoAcceso((prev) =>
+          prev ? { ...prev, hora_salida: res.horaSalida, estatus_acceso: 'salida' } : null
+        );
+      } else {
+        alert('No se pudo registrar la salida. Intente de nuevo.');
+      }
+    } catch (e: any) {
+      alert(`Error al registrar salida: ${e?.message || 'Error de conexión'}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleRegistrarEntrada = async () => {
+    if (!selectedVehicle) return;
+    setActionLoading(true);
+    try {
+      const officerId = parseInt(agenteActual?.id?.replace(/\D/g, '') || '1', 10) || 1;
+      const res = await SupabaseService.registrarEntradaVehiculo({
+        idVehiculo: selectedVehicle.id_vehiculo,
+        idCorbatin: selectedCorbatin?.id_corbatin,
+        idConductor: selectedConductor?.id_trabajador || null,
+        idUsuario: officerId,
+      });
+
+      if (res && res.success && res.acceso) {
+        setUltimoAcceso(res.acceso);
+        const horaFmt = formatHora(res.acceso.hora_entrada) || '';
+        alert(`¡Entrada autorizada y registrada a las ${horaFmt} hrs!`);
+      }
+    } catch (e: any) {
+      alert(`Error al registrar entrada: ${e?.message || 'Error de conexión'}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const lookupInProgress = React.useRef(false);
 
   const executeLookup = async (code: string) => {
@@ -118,6 +259,7 @@ export default function ScannerScreen() {
         setSelectedEmpresa(res.empresa);
         setSelectedConductor(res.conductorPrincipal || null);
         setSancionesActivas(res.sancionesActivas || []);
+        setUltimoAcceso(res.ultimoAcceso || null);
         setMode('result');
       } else {
         alert(`No se encontró vehículo ni corbatín con "${cleanCode}" en la base de datos.`);
@@ -272,17 +414,136 @@ export default function ScannerScreen() {
     }
   };
 
-  const isSuspended =
-    (selectedCorbatin?.estatus || '').toLowerCase() === 'suspendido' ||
-    (selectedCorbatin?.estatus || '').toLowerCase() === 'cancelado' ||
-    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'denegado' ||
-    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'suspendido' ||
-    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'restringido' ||
-    (selectedVehicle?.estatus_acceso || '').toLowerCase() === 'bloqueado' ||
-    sancionesActivas.length > 0;
+  const evaluacionSancion = React.useMemo(() => {
+    const estatusVehiculo = (selectedVehicle?.estatus_acceso || '').toLowerCase();
+    const estatusCorbatin = (selectedCorbatin?.estatus || '').toLowerCase();
+
+    if (
+      estatusCorbatin === 'cancelado' ||
+      estatusCorbatin === 'suspendido' ||
+      estatusVehiculo === 'denegado' ||
+      estatusVehiculo === 'restringido' ||
+      estatusVehiculo === 'bloqueado'
+    ) {
+      return {
+        isBlocked: true,
+        isWarning: false,
+        level: 4,
+        levelTitle: 'ACCESO RESTRINGIDO PERMANENTE',
+        levelBadge: 'LISTA NEGRA',
+        levelName: 'Nivel 4 - Lista Negra Permanente',
+        motivo: selectedCorbatin?.motivo_cancelacion || 'Acceso restringido permanentemente por administración HOA.',
+        timeRemainingText: 'Permanente',
+        fechaFinText: 'Permanente (Requiere Administrador)',
+        requiresAdmin: true,
+        badgeBg: '#991B1B',
+      };
+    }
+
+    if (!sancionesActivas || sancionesActivas.length === 0) {
+      return null;
+    }
+
+    // Tomar la sanción activa más relevante (mayor nivel o más reciente)
+    const sancion = [...sancionesActivas].sort((a, b) => (Number(b.numero_reincidencia) || 1) - (Number(a.numero_reincidencia) || 1))[0];
+    const nivel = Number(sancion.numero_reincidencia) || 1;
+    const fechaInicioMs = new Date(sancion.fecha_inicio || Date.now()).getTime();
+    const ahoraMs = Date.now();
+
+    // ─── 1ª FALTA: Llamado de atención (Banner amarillo informativo, acceso permitido) ───
+    if (nivel === 1) {
+      return {
+        isBlocked: false,
+        isWarning: true,
+        level: 1,
+        levelTitle: '1ª Falta: Llamado de Atención',
+        levelBadge: '1ª FALTA',
+        levelName: 'Nivel 1 - Llamado de Atención',
+        motivo: sancion.motivo || 'Primer llamado de atención registrado en el sistema.',
+        timeRemainingText: 'Informativo',
+        fechaFinText: 'Acceso Permitido',
+        requiresAdmin: false,
+        badgeBg: '#F59E0B',
+      };
+    }
+
+    // ─── 2ª FALTA: Suspensión de 1 día (Bloqueo automático de 24 horas) ───
+    if (nivel === 2) {
+      const fechaFinMs = sancion.fecha_fin
+        ? new Date(sancion.fecha_fin).getTime()
+        : fechaInicioMs + 24 * 60 * 60 * 1000;
+
+      if (ahoraMs < fechaFinMs) {
+        const diffMs = fechaFinMs - ahoraMs;
+        const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
+        const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        return {
+          isBlocked: true,
+          isWarning: false,
+          level: 2,
+          levelTitle: 'SUSPENSIÓN TEMPORAL (24 HORAS)',
+          levelBadge: 'SUSPENSIÓN 24H',
+          levelName: '2ª Falta - Suspensión de 1 Día',
+          motivo: sancion.motivo || 'Segunda infracción: suspensión de acceso por 24 horas.',
+          timeRemainingText: `${totalHours}h ${totalMinutes}m restantes`,
+          fechaFinText: new Date(fechaFinMs).toLocaleString(),
+          requiresAdmin: false,
+          badgeBg: '#EA580C',
+        };
+      }
+      // Ya transcurrieron las 24 horas -> Suspensión expirada automáticamente
+      return null;
+    }
+
+    // ─── 3ª FALTA: Suspensión de 1 semana (Bloqueo automático de 7 días) ───
+    if (nivel === 3) {
+      const fechaFinMs = sancion.fecha_fin
+        ? new Date(sancion.fecha_fin).getTime()
+        : fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
+
+      if (ahoraMs < fechaFinMs) {
+        const diffMs = fechaFinMs - ahoraMs;
+        const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60));
+        return {
+          isBlocked: true,
+          isWarning: false,
+          level: 3,
+          levelTitle: 'SUSPENSIÓN TEMPORAL (7 DÍAS)',
+          levelBadge: 'SUSPENSIÓN 7 DÍAS',
+          levelName: '3ª Falta - Suspensión de 1 Semana',
+          motivo: sancion.motivo || 'Tercera infracción: suspensión de acceso por 7 días.',
+          timeRemainingText: totalDays > 0 ? `${totalDays}d ${totalHours}h restantes` : `${totalHours}h restantes`,
+          fechaFinText: new Date(fechaFinMs).toLocaleString(),
+          requiresAdmin: false,
+          badgeBg: '#DC2626',
+        };
+      }
+      // Ya transcurrieron los 7 días -> Suspensión expirada automáticamente
+      return null;
+    }
+
+    // ─── 4ª FALTA O MÁS: Acceso restringido permanente (Lista Negra) ───
+    return {
+      isBlocked: true,
+      isWarning: false,
+      level: nivel >= 4 ? nivel : 4,
+      levelTitle: 'ACCESO RESTRINGIDO PERMANENTE',
+      levelBadge: 'LISTA NEGRA',
+      levelName: `Nivel ${nivel} - Lista Negra Permanente`,
+      motivo: sancion.motivo || 'Acceso restringido permanente por reincidencia.',
+      timeRemainingText: 'Requiere Administrador',
+      fechaFinText: 'Indefinido (Requiere Administrador HOA)',
+      requiresAdmin: true,
+      badgeBg: '#991B1B',
+    };
+  }, [selectedVehicle, selectedCorbatin, sancionesActivas]);
+
+  const isSuspended = !!evaluacionSancion?.isBlocked;
+  const hasWarningLevel1 = !!evaluacionSancion?.isWarning;
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: '#F8FAFC' }]}>
+    <View style={[styles.container, { backgroundColor: '#F8FAFC' }]}>
       {/* ─── 1. CAMERA VIEW (Image 1 Right) ─── */}
       {mode === 'camera' && (
         <ScrollView contentContainerStyle={styles.scrollPage} showsVerticalScrollIndicator={false}>
@@ -441,12 +702,14 @@ export default function ScannerScreen() {
       {mode === 'result' && selectedVehicle && selectedCorbatin && (
         <ScrollView contentContainerStyle={styles.scrollPage} showsVerticalScrollIndicator={false}>
           {isSuspended ? (
-            /* ─── ACCESO DENEGADO VIEW (Image 4 Right) ─── */
+            /* ─── ACCESO DENEGADO / SUSPENDIDO VIEW ─── */
             <View style={{ gap: 16 }}>
-              {/* Top Red Alert Full-Width Banner */}
-              <View style={styles.accessDeniedTopBanner}>
-                <Ionicons name="warning" size={20} color="#ffffff" style={{ marginRight: 8 }} />
-                <ThemedText style={styles.accessDeniedTopBannerText}>ACCESO DENEGADO</ThemedText>
+              {/* Top Dynamic Alert Full-Width Banner */}
+              <View style={[styles.accessDeniedTopBanner, { backgroundColor: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                <Ionicons name={evaluacionSancion?.requiresAdmin ? 'ban' : 'time'} size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                <ThemedText style={styles.accessDeniedTopBannerText}>
+                  {evaluacionSancion?.levelTitle || 'ACCESO DENEGADO'}
+                </ThemedText>
               </View>
 
               {/* Sub-bar with Volver and Timestamp */}
@@ -457,7 +720,9 @@ export default function ScannerScreen() {
                 </Pressable>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                   <Ionicons name="time-outline" size={14} color="#64748B" />
-                  <ThemedText style={styles.lastUpdateText}>Última actualización: Hoy, 09:42 AM</ThemedText>
+                  <ThemedText style={styles.lastUpdateText}>
+                    {evaluacionSancion?.timeRemainingText ? `Tiempo: ${evaluacionSancion.timeRemainingText}` : 'Sanción Vigente'}
+                  </ThemedText>
                 </View>
               </View>
 
@@ -479,9 +744,11 @@ export default function ScannerScreen() {
                     <ThemedText style={styles.suspendedVehicleTitle}>
                       {selectedVehicle.marca} {selectedVehicle.modelo}
                     </ThemedText>
-                    <View style={styles.suspendedRedBadge}>
-                      <View style={styles.dotRed} />
-                      <ThemedText style={styles.suspendedRedBadgeText}>SUSPENDIDO</ThemedText>
+                    <View style={[styles.suspendedRedBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2' }]}>
+                      <View style={[styles.dotRed, { backgroundColor: evaluacionSancion?.badgeBg || '#DC2626' }]} />
+                      <ThemedText style={[styles.suspendedRedBadgeText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                        {evaluacionSancion?.levelBadge || 'SUSPENDIDO'}
+                      </ThemedText>
                     </View>
                   </View>
 
@@ -507,10 +774,10 @@ export default function ScannerScreen() {
               {/* Active Suspension Details Card */}
               <View style={styles.suspensionDetailCard}>
                 <View style={styles.suspensionDetailHeader}>
-                  <View style={styles.gavelIconBox}>
-                    <Ionicons name="hammer" size={18} color="#DC2626" />
+                  <View style={[styles.gavelIconBox, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2' }]}>
+                    <Ionicons name="hammer" size={18} color={evaluacionSancion?.badgeBg || '#DC2626'} />
                   </View>
-                  <ThemedText style={styles.suspensionDetailHeading}>Detalles de Suspensión Activa</ThemedText>
+                  <ThemedText style={styles.suspensionDetailHeading}>Detalles de Sanción Vigente</ThemedText>
                 </View>
 
                 <View style={styles.suspensionDetailRow}>
@@ -518,16 +785,16 @@ export default function ScannerScreen() {
                     <ThemedText style={styles.dataLabel}>Motivo de Infracción</ThemedText>
                     <View style={styles.motifBox}>
                       <ThemedText style={styles.motifText}>
-                        {sancionesActivas[0]?.motivo || selectedCorbatin.motivo_cancelacion || 'Exceso de velocidad en zona peatonal y maniobra imprudente.'}
+                        {evaluacionSancion?.motivo || 'Falta a la normativa HOA.'}
                       </ThemedText>
                     </View>
                   </View>
                   <View style={{ flex: 1 }}>
-                    <ThemedText style={styles.dataLabel}>Reincidencia</ThemedText>
-                    <View style={styles.reincidenciaBadge}>
-                      <Ionicons name="warning" size={14} color="#DC2626" style={{ marginRight: 4 }} />
-                      <ThemedText style={styles.reincidenciaText}>
-                        {sancionesActivas[0]?.numero_reincidencia ? `Nivel ${sancionesActivas[0].numero_reincidencia}` : 'Nivel 1'}
+                    <ThemedText style={styles.dataLabel}>Nivel de Falta</ThemedText>
+                    <View style={[styles.reincidenciaBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2', borderColor: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                      <Ionicons name="warning" size={14} color={evaluacionSancion?.badgeBg || '#DC2626'} style={{ marginRight: 4 }} />
+                      <ThemedText style={[styles.reincidenciaText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                        {evaluacionSancion?.levelName || 'Nivel 1'}
                       </ThemedText>
                     </View>
                   </View>
@@ -535,13 +802,15 @@ export default function ScannerScreen() {
 
                 <View style={styles.suspensionVencimientoRow}>
                   <View>
-                    <ThemedText style={styles.dataLabel}>Vencimiento de Sanción</ThemedText>
+                    <ThemedText style={styles.dataLabel}>Término de Sanción</ThemedText>
                     <ThemedText style={styles.suspensionVencimientoText}>
-                      {sancionesActivas[0]?.fecha_fin ? new Date(sancionesActivas[0].fecha_fin).toLocaleDateString() : 'Activa'}
+                      {evaluacionSancion?.fechaFinText || 'Activa'}
                     </ThemedText>
                   </View>
-                  <View style={styles.hoursRemainingBadge}>
-                    <ThemedText style={styles.hoursRemainingText}>En revisión</ThemedText>
+                  <View style={[styles.hoursRemainingBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2', borderColor: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                    <ThemedText style={[styles.hoursRemainingText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                      {evaluacionSancion?.timeRemainingText || 'En revisión'}
+                    </ThemedText>
                   </View>
                 </View>
               </View>
@@ -562,30 +831,49 @@ export default function ScannerScreen() {
               </Pressable>
             </View>
           ) : (
-            /* ─── VEHÍCULO IDENTIFICADO (HABILITADO) VIEW (Image 4 Left) ─── */
+            /* ─── VEHÍCULO IDENTIFICADO (HABILITADO) VIEW ─── */
             <View style={{ gap: 16 }}>
               {/* Header */}
               <View style={styles.identifiedHeaderRow}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={styles.identifiedHeaderLeft}>
                   <Pressable onPress={handleBackPress} style={styles.backIconButton}>
                     <Ionicons name="arrow-back" size={20} color="#0f172a" />
                   </Pressable>
-                  <View>
-                    <ThemedText style={styles.screenMainTitle}>
+                  <View style={styles.identifiedTitleContainer}>
+                    <ThemedText style={styles.screenMainTitle} numberOfLines={1}>
                       Corbatín #{selectedCorbatin.numero}
                     </ThemedText>
-                    <ThemedText style={styles.screenSubTitle}>
-                      Detalle de registro vehicular y permisos de acceso.
+                    <ThemedText style={styles.screenSubTitle} numberOfLines={1}>
+                      Detalle de registro vehicular y permisos
                     </ThemedText>
                   </View>
                 </View>
 
                 {/* Green Habilitado Badge */}
                 <View style={styles.habilitadoPillBadge}>
-                  <Ionicons name="checkmark-circle" size={16} color="#059669" style={{ marginRight: 6 }} />
+                  <Ionicons name="checkmark-circle" size={15} color="#059669" style={{ marginRight: 4 }} />
                   <ThemedText style={styles.habilitadoPillBadgeText}>HABILITADO</ThemedText>
                 </View>
               </View>
+
+              {/* ─── BANNER INFORMATIVO AMARILLO PARA 1ª FALTA (LLAMADO DE ATENCIÓN) ─── */}
+              {hasWarningLevel1 && (
+                <View style={styles.warningLevel1Banner}>
+                  <View style={styles.warningLevel1IconCircle}>
+                    <Ionicons name="warning" size={20} color="#D97706" />
+                  </View>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <ThemedText style={styles.warningLevel1Title}>1ª Falta: Llamado de Atención</ThemedText>
+                    <ThemedText style={styles.warningLevel1Desc}>
+                      {evaluacionSancion?.motivo || 'Primer llamado de atención registrado en el sistema. Se autoriza el acceso vehicular.'}
+                    </ThemedText>
+                  </View>
+                  <View style={styles.warningLevel1Pill}>
+                    <Ionicons name="checkmark-circle" size={12} color="#059669" style={{ marginRight: 4 }} />
+                    <ThemedText style={styles.warningLevel1PillText}>PERMITIDO</ThemedText>
+                  </View>
+                </View>
+              )}
 
               {/* 2-Column Layout */}
               <View style={styles.identified2ColRow}>
@@ -656,27 +944,44 @@ export default function ScannerScreen() {
                     </View>
                   </View>
 
-                  {/* Card Historial Reciente */}
-                  <View style={styles.historyCard}>
+                  {/* Card Historial y Estatus de Caseta */}
+                  <View style={[styles.historyCard, isVehicleInside && styles.historyCardInsideHighlight]}>
                     <View style={styles.cardHeaderTitleRow}>
-                      <Ionicons name="time-outline" size={16} color="#64748B" style={{ marginRight: 6 }} />
-                      <ThemedText style={styles.historyCardTitle}>Historial Reciente</ThemedText>
+                      <Ionicons
+                        name={isVehicleInside ? 'navigate-circle' : 'time-outline'}
+                        size={16}
+                        color={isVehicleInside ? '#0D6E5F' : '#64748B'}
+                        style={{ marginRight: 6 }}
+                      />
+                      <ThemedText style={[styles.historyCardTitle, isVehicleInside && { color: '#0D6E5F' }]}>
+                        {isVehicleInside ? 'Vehículo Dentro del Complejo' : 'Estatus de Estancia en Caseta'}
+                      </ThemedText>
                     </View>
                     <View style={styles.historyRowBox}>
-                      <Ionicons name="checkmark-circle-outline" size={28} color="#94A3B8" />
+                      <Ionicons
+                        name={isVehicleInside ? 'checkmark-circle' : 'log-out-outline'}
+                        size={28}
+                        color={isVehicleInside ? '#10B981' : '#94A3B8'}
+                      />
                       <View style={{ flex: 1 }}>
                         <ThemedText style={styles.historyRowTitle}>
-                          Sin infracciones activas o reportes recientes.
+                          {isVehicleInside
+                            ? `🟢 Acceso activo registrado a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`
+                            : isAccesoToday && formatHora(ultimoAcceso?.hora_salida)
+                            ? `⚪ Última salida registrada a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
+                            : 'Sin registro de estancia activo el día de hoy.'}
                         </ThemedText>
                         <ThemedText style={styles.historyRowSubtitle}>
-                          Último acceso registrado hace 4 horas.
+                          {isVehicleInside
+                            ? `Tiempo de estancia actual: ${tiempoEstancia || 'En curso'}`
+                            : 'El vehículo se encuentra fuera del resort.'}
                         </ThemedText>
                       </View>
                     </View>
                   </View>
                 </View>
 
-                {/* Right Column: Foto, Botón de Infracción & Enlace */}
+                {/* Right Column: Foto, Botón de Salida/Entrada, Botón de Infracción & Enlace */}
                 <View style={styles.identifiedRightCol}>
                   <Pressable
                     onPress={() => setLightboxPhoto(selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[0])}
@@ -696,18 +1001,74 @@ export default function ScannerScreen() {
                     </View>
                   </Pressable>
 
+                  {/* ─── BOTÓN PRINCIPAL DE CONTROL DE ACCESO (SALIDA / ENTRADA) ─── */}
+                  {isVehicleInside ? (
+                    <Pressable
+                      onPress={handleMarcarSalida}
+                      disabled={actionLoading}
+                      style={({ pressed }) => [
+                        styles.exitActionBtn,
+                        pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                        actionLoading && { opacity: 0.7 },
+                      ]}
+                    >
+                      {actionLoading ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Ionicons name="log-out-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                          <ThemedText style={styles.exitActionBtnText}>
+                            MARCAR SALIDA DEL VEHÍCULO
+                          </ThemedText>
+                        </>
+                      )}
+                    </Pressable>
+                  ) : (
+                    <Pressable
+                      onPress={handleRegistrarEntrada}
+                      disabled={actionLoading}
+                      style={({ pressed }) => [
+                        styles.entryActionBtn,
+                        pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                        actionLoading && { opacity: 0.7 },
+                      ]}
+                    >
+                      {actionLoading ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Ionicons name="log-in-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                          <ThemedText style={styles.entryActionBtnText}>
+                            REGISTRAR ENTRADA
+                          </ThemedText>
+                        </>
+                      )}
+                    </Pressable>
+                  )}
+
                   {/* Action Button: REPORTAR INFRACCIÓN */}
                   <Pressable
                     onPress={startReportWizard}
+                    disabled={!isVehicleInside}
                     style={({ pressed }) => [
-                      styles.reportYellowBtn,
-                      { backgroundColor: '#0D6E5F' },
-                      pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                      styles.reportInfractionSecBtn,
+                      !isVehicleInside && styles.reportInfractionDisabledBtn,
+                      pressed && isVehicleInside && { opacity: 0.9, transform: [{ scale: 0.98 }] },
                     ]}
                   >
-                    <Ionicons name="warning-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
-                    <ThemedText style={[styles.reportYellowBtnText, { color: '#ffffff' }]}>
-                      REPORTAR INFRACCIÓN
+                    <Ionicons
+                      name={isVehicleInside ? 'warning-outline' : 'ban-outline'}
+                      size={18}
+                      color={isVehicleInside ? '#D97706' : '#94A3B8'}
+                      style={{ marginRight: 8 }}
+                    />
+                    <ThemedText
+                      style={[
+                        styles.reportInfractionSecBtnText,
+                        !isVehicleInside && styles.reportInfractionDisabledText,
+                      ]}
+                    >
+                      {isVehicleInside ? 'REPORTAR INFRACCIÓN' : 'REPORTAR INFRACCIÓN (VEHÍCULO FUERA)'}
                     </ThemedText>
                   </Pressable>
 
@@ -1153,7 +1514,88 @@ export default function ScannerScreen() {
           </View>
         </Modal>
       )}
-    </SafeAreaView>
+
+      {/* ─── MODAL DE CONFIRMACIÓN DE SALIDA EXITOSA ─── */}
+      {exitSuccessModal && (
+        <Modal
+          visible={exitSuccessModal.visible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setExitSuccessModal(null)}
+        >
+          <View style={styles.exitModalOverlay}>
+            <View style={styles.exitModalCard}>
+              <View style={styles.exitModalHalo}>
+                <Ionicons name="checkmark-circle" size={56} color="#10B981" />
+              </View>
+
+              <ThemedText style={styles.exitModalTitle}>¡Salida Marcada Exitosamente!</ThemedText>
+              <ThemedText style={styles.exitModalSubtitle}>
+                El vehículo ha salido del complejo. Se registró la hora de salida en la bitácora oficial.
+              </ThemedText>
+
+              {/* Receipt info card */}
+              <View style={styles.exitReceiptBox}>
+                <View style={styles.exitReceiptRow}>
+                  <ThemedText style={styles.exitReceiptLabel}>Vehículo / Placas:</ThemedText>
+                  <ThemedText style={styles.exitReceiptValBold}>
+                    {selectedVehicle?.placas} &bull; {selectedVehicle?.marca} {selectedVehicle?.modelo}
+                  </ThemedText>
+                </View>
+                <View style={styles.exitReceiptRow}>
+                  <ThemedText style={styles.exitReceiptLabel}>Corbatín:</ThemedText>
+                  <ThemedText style={styles.exitReceiptVal}>#{selectedCorbatin?.numero}</ThemedText>
+                </View>
+                {exitSuccessModal.horaEntrada && (
+                  <View style={styles.exitReceiptRow}>
+                    <ThemedText style={styles.exitReceiptLabel}>Hora de Ingreso:</ThemedText>
+                    <ThemedText style={styles.exitReceiptVal}>{exitSuccessModal.horaEntrada} hrs</ThemedText>
+                  </View>
+                )}
+                <View style={styles.exitReceiptRow}>
+                  <ThemedText style={styles.exitReceiptLabel}>Hora de Salida:</ThemedText>
+                  <ThemedText style={styles.exitReceiptValGreen}>{exitSuccessModal.horaSalida} hrs</ThemedText>
+                </View>
+                {exitSuccessModal.duracion && (
+                  <View style={styles.exitReceiptRow}>
+                    <ThemedText style={styles.exitReceiptLabel}>Tiempo de Estancia:</ThemedText>
+                    <ThemedText style={styles.exitReceiptVal}>{exitSuccessModal.duracion}</ThemedText>
+                  </View>
+                )}
+              </View>
+
+              {/* Action buttons */}
+              <View style={styles.exitModalBtnCol}>
+                <Pressable
+                  onPress={() => {
+                    setExitSuccessModal(null);
+                    setMode('camera');
+                    setManualCorbatinInput('');
+                  }}
+                  style={({ pressed }) => [
+                    styles.exitModalScanNextBtn,
+                    pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                  ]}
+                >
+                  <Ionicons name="scan-outline" size={18} color="#ffffff" style={{ marginRight: 6 }} />
+                  <ThemedText style={styles.exitModalScanNextBtnText}>Escanear Siguiente Vehículo</ThemedText>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => setExitSuccessModal(null)}
+                  style={({ pressed }) => [
+                    styles.exitModalCloseBtn,
+                    pressed && { opacity: 0.8 },
+                  ]}
+                >
+                  <ThemedText style={styles.exitModalCloseBtnText}>Cerrar Detalle</ThemedText>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
+    </View>
   );
 }
 
@@ -1162,9 +1604,10 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollPage: {
-    padding: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    paddingTop: 8,
     paddingBottom: 40,
-    gap: 14,
+    gap: 12,
   },
   miniResortHeader: {
     position: 'relative',
@@ -2015,7 +2458,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: 6,
+    gap: 8,
+  },
+  identifiedHeaderLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minWidth: 0,
+  },
+  identifiedTitleContainer: {
+    flex: 1,
+    minWidth: 0,
   },
   habilitadoPillBadge: {
     flexDirection: 'row',
@@ -2023,29 +2478,30 @@ const styles = StyleSheet.create({
     backgroundColor: '#ECFDF5',
     borderWidth: 1.5,
     borderColor: '#10B981',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     borderRadius: 10,
+    flexShrink: 0,
   },
   habilitadoPillBadgeText: {
     color: '#059669',
-    fontSize: 12.5,
+    fontSize: 11.5,
     fontWeight: '900',
     letterSpacing: 0.3,
   },
   identified2ColRow: {
     flexDirection: 'row',
-    gap: 16,
+    gap: 14,
     flexWrap: 'wrap',
   },
   identifiedLeftCol: {
-    flex: 1.6,
-    minWidth: 320,
+    flex: 1.4,
+    minWidth: 280,
     gap: 14,
   },
   identifiedRightCol: {
     flex: 1,
-    minWidth: 240,
+    minWidth: 280,
     gap: 12,
   },
   vehicleDataCardGreenLeft: {
@@ -2415,5 +2871,230 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#94A3B8',
     fontWeight: '600',
+  },
+  historyCardInsideHighlight: {
+    borderColor: '#0D6E5F',
+    backgroundColor: '#F0FDF4',
+    borderLeftWidth: 4,
+    borderLeftColor: '#0D6E5F',
+  },
+  exitActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0D6E5F',
+    height: 48,
+    borderRadius: 12,
+    shadowColor: '#0D6E5F',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  exitActionBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  entryActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0D6E5F',
+    height: 48,
+    borderRadius: 12,
+    shadowColor: '#0D6E5F',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  entryActionBtnText: {
+    color: '#ffffff',
+    fontSize: 13.5,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  reportInfractionSecBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1.5,
+    borderColor: '#F59E0B',
+    height: 46,
+    borderRadius: 12,
+  },
+  reportInfractionSecBtnText: {
+    color: '#92400E',
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  reportInfractionDisabledBtn: {
+    backgroundColor: '#F1F5F9',
+    borderColor: '#CBD5E1',
+    opacity: 0.75,
+  },
+  reportInfractionDisabledText: {
+    color: '#94A3B8',
+  },
+  exitModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.82)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  exitModalCard: {
+    width: '100%',
+    maxWidth: 440,
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    padding: 24,
+    alignItems: 'center',
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  exitModalHalo: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  exitModalTitle: {
+    fontSize: 19,
+    fontWeight: '900',
+    color: '#0f172a',
+    textAlign: 'center',
+    letterSpacing: -0.3,
+  },
+  exitModalSubtitle: {
+    fontSize: 12.5,
+    color: '#64748B',
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  exitReceiptBox: {
+    width: '100%',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    gap: 8,
+    marginVertical: 4,
+  },
+  exitReceiptRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  exitReceiptLabel: {
+    fontSize: 11.5,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  exitReceiptVal: {
+    fontSize: 12.5,
+    color: '#0f172a',
+    fontWeight: '700',
+  },
+  exitReceiptValBold: {
+    fontSize: 12.5,
+    color: '#0f172a',
+    fontWeight: '800',
+  },
+  exitReceiptValGreen: {
+    fontSize: 13.5,
+    color: '#059669',
+    fontWeight: '900',
+  },
+  exitModalBtnCol: {
+    width: '100%',
+    gap: 8,
+    marginTop: 6,
+  },
+  exitModalScanNextBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0D6E5F',
+    height: 46,
+    borderRadius: 12,
+    shadowColor: '#0D6E5F',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  exitModalScanNextBtnText: {
+    color: '#ffffff',
+    fontSize: 13.5,
+    fontWeight: '900',
+  },
+  exitModalCloseBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: '#F1F5F9',
+  },
+  exitModalCloseBtnText: {
+    color: '#475569',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  warningLevel1Banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1.5,
+    borderColor: '#F59E0B',
+    borderRadius: 14,
+    padding: 12,
+    gap: 12,
+  },
+  warningLevel1IconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(245, 158, 11, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  warningLevel1Title: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: '#92400E',
+  },
+  warningLevel1Desc: {
+    fontSize: 11.5,
+    color: '#78350F',
+    fontWeight: '600',
+    lineHeight: 16,
+  },
+  warningLevel1Pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#10B981',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  warningLevel1PillText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#059669',
   },
 });
