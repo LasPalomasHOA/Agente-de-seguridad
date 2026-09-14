@@ -53,23 +53,40 @@ const formatHora = (timeStr?: string | null): string | null => {
   const clean = timeStr.trim();
   if (!clean || clean === 'null' || clean === 'undefined') return null;
 
-  // 1. Si es formato timestamp con fecha ("2026-09-14 19:10:48.884" o "2026-09-14T19:10:48Z")
-  const dateMatch = clean.match(/(?:T|\s)(\d{1,2}):(\d{2})/);
-  if (dateMatch) {
-    const utcHour = parseInt(dateMatch[1], 10);
-    const min = dateMatch[2];
-    let localHour = utcHour - 7;
-    if (localHour < 0) localHour += 24;
-    localHour = localHour % 24;
-    return `${String(localHour).padStart(2, '0')}:${min}`;
+  // 1. Si es un ISO String UTC completo (ej: "2026-09-14T19:48:00.000Z")
+  if (clean.includes('T') || clean.endsWith('Z')) {
+    const d = new Date(clean);
+    if (!isNaN(d.getTime())) {
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
   }
 
-  // 2. Si ya es una hora directa convertida ("12:10:48" o "12:10")
-  const directMatch = clean.match(/^(\d{1,2}):(\d{2})/);
-  if (directMatch) {
-    const hh = directMatch[1].padStart(2, '0');
-    const mm = directMatch[2];
-    return `${hh}:${mm}`;
+  // 2. Si viene como timestamp SQL con espacio (ej: "2026-09-14 19:48:00")
+  if (clean.includes('-') && clean.includes(' ')) {
+    const d = new Date(clean.replace(' ', 'T') + 'Z');
+    if (!isNaN(d.getTime())) {
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${hh}:${mm}`;
+    }
+  }
+
+  // 3. Si viene únicamente como formato TIME ("19:48:00" o "12:48:00")
+  const match = clean.match(/^(\d{1,2}):(\d{2})/);
+  if (match) {
+    let hour = parseInt(match[1], 10);
+    const min = match[2];
+
+    // Si la hora viene inflada en UTC (ej: 19 o más tarde) respecto a la hora local actual
+    const currentLocalHour = new Date().getHours();
+    if (hour - currentLocalHour >= 5) {
+      hour = hour - 7;
+      if (hour < 0) hour += 24;
+    }
+
+    return `${String(hour).padStart(2, '0')}:${min}`;
   }
 
   return null;

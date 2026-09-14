@@ -311,24 +311,12 @@ export const parseUtcTimestampToLocalTimeStr = (
   const clean = val.trim();
   if (!clean || clean === 'null' || clean === 'undefined') return null;
 
-  // 1. Si es timestamp con fecha ("2026-09-14 18:59:37.272" o "2026-09-14T18:59:37Z")
-  const dateMatch = clean.match(/(?:T|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (dateMatch) {
-    const utcHour = parseInt(dateMatch[1], 10);
-    const min = dateMatch[2];
-    const sec = dateMatch[3] || '00';
-    let localHour = utcHour - 7;
-    if (localHour < 0) localHour += 24;
-    localHour = localHour % 24;
-    return `${String(localHour).padStart(2, '0')}:${min}:${sec}`;
-  }
-
-  // 2. Si es una hora directa UTC de base de datos ("18:59:00" o "18:59:37.272")
-  const directMatch = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (directMatch) {
-    const utcHour = parseInt(directMatch[1], 10);
-    const min = directMatch[2];
-    const sec = directMatch[3] || '00';
+  // Extraer hora y minutos de cualquier formato UTC (TIMESTAMP WITH TIME ZONE, TIME puro, ISO)
+  const match = clean.match(/(?:T|\s|^)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (match) {
+    const utcHour = parseInt(match[1], 10);
+    const min = match[2];
+    const sec = match[3] || '00';
     let localHour = utcHour - 7;
     if (localHour < 0) localHour += 24;
     localHour = localHour % 24;
@@ -1340,17 +1328,6 @@ export const ApiService = {
       // FILTRADO ESTRICTO: Solo aceptar el registro si realmente pertenece a idVehiculo
       const matchedRow = list.find((r: any) => Number(r.id_vehiculo) === Number(idVehiculo));
       if (matchedRow) {
-        const horaEntrada = parseUtcTimestampToLocalTimeStr(
-          matchedRow.hora_entrada,
-          matchedRow.created_at
-        );
-        const horaSalida = (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
-          ? parseUtcTimestampToLocalTimeStr(
-              matchedRow.hora_salida,
-              matchedRow.updated_at || matchedRow.created_at
-            )
-          : null;
-
         const mapped: BitacoraAccesoRow = {
           id_acceso: matchedRow.id_acceso,
           id_caseta: matchedRow.id_caseta || 1,
@@ -1359,10 +1336,12 @@ export const ApiService = {
           id_conductor: matchedRow.id_conductor || null,
           id_usuario: matchedRow.id_usuario || 1,
           fecha: matchedRow.fecha || (matchedRow.created_at || '').split('T')[0] || getLocalDateStr(),
-          hora_entrada: horaEntrada,
-          hora_salida: horaSalida,
+          hora_entrada: matchedRow.hora_entrada && matchedRow.hora_entrada !== 'null' ? matchedRow.hora_entrada : (matchedRow.created_at || null),
+          hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
+            ? (matchedRow.hora_salida && matchedRow.hora_salida !== 'null' ? matchedRow.hora_salida : (matchedRow.updated_at || matchedRow.created_at || null))
+            : null,
           ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
-          estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (horaSalida ? 'salida' : 'permitido'),
+          estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (matchedRow.hora_salida ? 'salida' : 'permitido'),
           motivo_rechazo: matchedRow.motivo_rechazo || null,
           observaciones: matchedRow.observaciones || null,
           created_at: matchedRow.created_at || new Date().toISOString(),
@@ -1387,17 +1366,6 @@ export const ApiService = {
         if (!error && data && data.length > 0) {
           const matchedRow = data.find((r: any) => Number(r.id_vehiculo) === Number(idVehiculo)) || (Number(data[0].id_vehiculo) === Number(idVehiculo) ? data[0] : null);
           if (matchedRow) {
-            const horaEntrada = parseUtcTimestampToLocalTimeStr(
-              matchedRow.hora_entrada,
-              matchedRow.created_at
-            );
-            const horaSalida = (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
-              ? parseUtcTimestampToLocalTimeStr(
-                  matchedRow.hora_salida,
-                  matchedRow.updated_at || matchedRow.created_at
-                )
-              : null;
-
             const mapped: BitacoraAccesoRow = {
               id_acceso: matchedRow.id_acceso,
               id_caseta: matchedRow.id_caseta || 1,
@@ -1406,10 +1374,12 @@ export const ApiService = {
               id_conductor: matchedRow.id_conductor || null,
               id_usuario: matchedRow.id_usuario || 1,
               fecha: matchedRow.fecha || (matchedRow.created_at || '').split('T')[0] || getLocalDateStr(),
-              hora_entrada: horaEntrada,
-              hora_salida: horaSalida,
+              hora_entrada: matchedRow.hora_entrada && matchedRow.hora_entrada !== 'null' ? matchedRow.hora_entrada : (matchedRow.created_at || null),
+              hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
+                ? (matchedRow.hora_salida && matchedRow.hora_salida !== 'null' ? matchedRow.hora_salida : (matchedRow.updated_at || matchedRow.created_at || null))
+                : null,
               ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
-              estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (horaSalida ? 'salida' : 'permitido'),
+              estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (matchedRow.hora_salida ? 'salida' : 'permitido'),
               motivo_rechazo: matchedRow.motivo_rechazo || null,
               observaciones: matchedRow.observaciones || null,
               created_at: matchedRow.created_at || new Date().toISOString(),
@@ -1678,8 +1648,7 @@ export const ApiService = {
       };
       const now = new Date();
       const fechaStr = getLocalDateStr(now);
-      const horaStr = getLocalTimeStr(now);
-      const localTimestampStr = `${fechaStr} ${horaStr}`;
+      const utcIsoStr = now.toISOString();
 
       await fetchJson('/bitacora', {
         method: 'POST',
@@ -1690,7 +1659,7 @@ export const ApiService = {
           id_conductor: params.idConductor || null,
           id_usuario: params.idUsuario,
           fecha: fechaStr,
-          hora_entrada: localTimestampStr,
+          hora_entrada: utcIsoStr,
           ubicacion_trabajo: params.ubicacionTrabajo || null,
           estatus_acceso: estatusMap[params.estatusAcceso] || 'PERMITIDO',
           motivo_rechazo: params.motivoRechazo || null,
