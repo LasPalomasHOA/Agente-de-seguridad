@@ -5,8 +5,6 @@ import {
   EmpresaRow,
   TrabajadorRow,
   CatalogoInfraccionRow,
-  ReporteInfraccionDbRow,
-  EvidenciaDbRow,
   SancionDbRow,
   BitacoraAccesoRow,
   ReglamentoRow,
@@ -675,10 +673,13 @@ export const ApiService = {
       const { primaryKey, aliasKeys, numbers, plates } = this.getCanonicalLookupKeys(cleanParam);
       for (const key of aliasKeys) {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
-        if (cachedResult && cachedResult.vehiculo) {
+        if (cachedResult && cachedResult.vehiculo && Number(cachedResult.vehiculo.id_vehiculo) > 0) {
           // El vehículo y corbatín son estáticos (ahorro masivo de egress),
           // pero el último acceso vehicular siempre se consulta en vivo
-          const liveAcceso = await this.getUltimoAcceso(cachedResult.vehiculo.id_vehiculo);
+          const liveAcceso = await this.getUltimoAcceso(
+            cachedResult.vehiculo.id_vehiculo,
+            cachedResult.corbatin?.id_corbatin
+          );
           cachedResult.ultimoAcceso = liveAcceso || null;
           return cachedResult;
         }
@@ -700,19 +701,31 @@ export const ApiService = {
             : directCorbRes?.corbatines || (directCorbRes?.id_corbatin ? [directCorbRes] : []);
 
           if (corbList.length > 0) {
-            const matched = corbList.find((c: any) => Number(c.numero) === targetNum);
-            if (matched && Number(matched.numero) === targetNum) {
-              matchedCorbatin = matched;
-              if (matchedCorbatin.vehiculo) {
-                matchedVehiculo = matchedCorbatin.vehiculo;
-              } else if (matchedCorbatin.id_vehiculo) {
-                const directVehRes = await fetchJson(`/vehiculos?id_vehiculo=${matchedCorbatin.id_vehiculo}&limit=1`).catch(() => null);
-                const vList = Array.isArray(directVehRes)
-                  ? directVehRes
-                  : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
-                const matchedV = vList.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo));
-                if (matchedV) {
-                  matchedVehiculo = matchedV;
+            const matchingCorbs = corbList.filter((c: any) => Number(c.numero) === targetNum);
+            if (matchingCorbs.length > 0) {
+              // Priorizar el corbatín que tenga vehículo asignado y esté activo
+              const matched =
+                matchingCorbs.find(
+                  (c: any) =>
+                    (c.vehiculo || c.id_vehiculo) &&
+                    String(c.estatus || '').toLowerCase() === 'activo'
+                ) ||
+                matchingCorbs.find((c: any) => c.vehiculo || c.id_vehiculo) ||
+                matchingCorbs[0];
+
+              if (matched && Number(matched.numero) === targetNum) {
+                matchedCorbatin = matched;
+                if (matchedCorbatin.vehiculo) {
+                  matchedVehiculo = matchedCorbatin.vehiculo;
+                } else if (matchedCorbatin.id_vehiculo) {
+                  const directVehRes = await fetchJson(`/vehiculos?id_vehiculo=${matchedCorbatin.id_vehiculo}&limit=1`).catch(() => null);
+                  const vList = Array.isArray(directVehRes)
+                    ? directVehRes
+                    : directVehRes?.vehiculos || (directVehRes?.id_vehiculo ? [directVehRes] : []);
+                  const matchedV = vList.find((v: any) => Number(v.id_vehiculo) === Number(matchedCorbatin.id_vehiculo));
+                  if (matchedV) {
+                    matchedVehiculo = matchedV;
+                  }
                 }
               }
             }
@@ -768,19 +781,29 @@ export const ApiService = {
               const { data: directCorb, error: corbErr } = await (supabase as any)
                 .from('corbatines')
                 .select(PROJECTIONS.CORBATINES_LIGHT)
-                .eq('numero', targetNum)
-                .limit(1);
+                .eq('numero', targetNum);
 
-              if (!corbErr && directCorb && directCorb.length > 0 && Number(directCorb[0].numero) === targetNum) {
-                matchedCorbatin = directCorb[0];
-                if (matchedCorbatin.id_vehiculo) {
-                  const { data: directVeh, error: vehErr } = await (supabase as any)
-                    .from('vehiculos')
-                    .select(PROJECTIONS.VEHICULOS_LIGHT)
-                    .eq('id_vehiculo', matchedCorbatin.id_vehiculo)
-                    .limit(1);
-                  if (!vehErr && directVeh && directVeh.length > 0) {
-                    matchedVehiculo = directVeh[0];
+              if (!corbErr && directCorb && directCorb.length > 0) {
+                const matched =
+                  directCorb.find(
+                    (c: any) =>
+                      c.id_vehiculo &&
+                      String(c.estatus || '').toLowerCase() === 'activo'
+                  ) ||
+                  directCorb.find((c: any) => c.id_vehiculo) ||
+                  directCorb[0];
+
+                if (matched && Number(matched.numero) === targetNum) {
+                  matchedCorbatin = matched;
+                  if (matchedCorbatin.id_vehiculo) {
+                    const { data: directVeh, error: vehErr } = await (supabase as any)
+                      .from('vehiculos')
+                      .select(PROJECTIONS.VEHICULOS_LIGHT)
+                      .eq('id_vehiculo', matchedCorbatin.id_vehiculo)
+                      .limit(1);
+                    if (!vehErr && directVeh && directVeh.length > 0) {
+                      matchedVehiculo = directVeh[0];
+                    }
                   }
                 }
               }
@@ -882,7 +905,7 @@ export const ApiService = {
       const [todasSanciones, totalInfracciones, ultimoAcceso] = await Promise.all([
         this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
         this.getReportesCount({ idVehiculo: vehiculoRow.id_vehiculo }),
-        this.getUltimoAcceso(vehiculoRow.id_vehiculo),
+        this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin),
       ]);
 
       const sancionesActivas = (todasSanciones || [])
@@ -1295,14 +1318,17 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene el último registro de acceso para un vehículo en particular
+   * Obtiene el último registro de acceso para un vehículo o corbatín en particular
    */
-  async getUltimoAcceso(idVehiculo: number): Promise<BitacoraAccesoRow | null> {
-    if (!idVehiculo) return null;
-    const cacheKey = `ultimo_acceso_veh_${idVehiculo}`;
+  async getUltimoAcceso(idVehiculo?: number | null, idCorbatin?: number | null): Promise<BitacoraAccesoRow | null> {
+    const vId = idVehiculo ? Number(idVehiculo) : null;
+    const cId = idCorbatin ? Number(idCorbatin) : null;
+    if (!vId && !cId) return null;
+
+    const cacheKey = vId ? `ultimo_acceso_veh_${vId}` : `ultimo_acceso_corb_${cId}`;
     const cached = apiCache.get<BitacoraAccesoRow>(cacheKey, 3 * 1000);
     if (cached !== null && cached !== undefined) {
-      if (Number(cached.id_vehiculo) === Number(idVehiculo)) {
+      if ((vId && Number(cached.id_vehiculo) === vId) || (cId && Number(cached.id_corbatin) === cId)) {
         return cached;
       }
       apiCache.invalidate(cacheKey);
@@ -1314,8 +1340,8 @@ export const ApiService = {
       const localMapStr = safeStorage.getItem('hoa_local_bitacora_map');
       if (localMapStr) {
         const map = JSON.parse(localMapStr);
-        const entry = map ? (map[String(idVehiculo)] || map[idVehiculo]) : null;
-        if (entry && Number(entry.id_vehiculo) === Number(idVehiculo)) {
+        const entry = map ? (vId ? (map[String(vId)] || map[vId]) : (map[`corb_${cId}`])) : null;
+        if (entry && ((vId && Number(entry.id_vehiculo) === vId) || (cId && Number(entry.id_corbatin) === cId))) {
           localAcceso = entry;
         }
       }
@@ -1323,10 +1349,11 @@ export const ApiService = {
 
     // 2. Consultar servidor Express
     try {
-      const res = await fetchJson(`/bitacora?id_vehiculo=${idVehiculo}&limit=1`);
+      const queryParam = vId ? `id_vehiculo=${vId}` : `id_corbatin=${cId}`;
+      const res = await fetchJson(`/bitacora?${queryParam}&limit=1`);
       const list = Array.isArray(res) ? res : res?.accesos || (res?.id_acceso ? [res] : []);
-      // FILTRADO ESTRICTO: Solo aceptar el registro si realmente pertenece a idVehiculo
-      const matchedRow = list.find((r: any) => Number(r.id_vehiculo) === Number(idVehiculo));
+      // FILTRADO ESTRICTO: Solo aceptar el registro si realmente pertenece a idVehiculo o idCorbatin
+      const matchedRow = list.find((r: any) => (vId && Number(r.id_vehiculo) === vId) || (cId && Number(r.id_corbatin) === cId));
       if (matchedRow) {
         const mapped: BitacoraAccesoRow = {
           id_acceso: matchedRow.id_acceso,
@@ -1356,15 +1383,22 @@ export const ApiService = {
     // 3. Supabase Fallback
     if (isSupabaseConfigured()) {
       try {
-        const { data, error } = await (supabase as any)
+        let query = (supabase as any)
           .from('bitacora_accesos')
-          .select(PROJECTIONS.BITACORA_LIGHT)
-          .eq('id_vehiculo', idVehiculo)
+          .select(PROJECTIONS.BITACORA_LIGHT);
+
+        if (vId) {
+          query = query.eq('id_vehiculo', vId);
+        } else if (cId) {
+          query = query.eq('id_corbatin', cId);
+        }
+
+        const { data, error } = await query
           .order('id_acceso', { ascending: false })
           .limit(1);
 
         if (!error && data && data.length > 0) {
-          const matchedRow = data.find((r: any) => Number(r.id_vehiculo) === Number(idVehiculo)) || (Number(data[0].id_vehiculo) === Number(idVehiculo) ? data[0] : null);
+          const matchedRow = data.find((r: any) => (vId && Number(r.id_vehiculo) === vId) || (cId && Number(r.id_corbatin) === cId)) || data[0];
           if (matchedRow) {
             const mapped: BitacoraAccesoRow = {
               id_acceso: matchedRow.id_acceso,
@@ -1394,7 +1428,7 @@ export const ApiService = {
     }
 
     // 4. Si el backend no devolvió filas pero hay registro local
-    if (localAcceso && Number(localAcceso.id_vehiculo) === Number(idVehiculo)) {
+    if (localAcceso && ((vId && Number(localAcceso.id_vehiculo) === vId) || (cId && Number(localAcceso.id_corbatin) === cId))) {
       return localAcceso;
     }
 
@@ -1448,6 +1482,9 @@ export const ApiService = {
 
     // Invalidar únicamente la caché del último acceso de este vehículo (preserva catálogos de vehículos en RAM)
     apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
+    if (params.idCorbatin) {
+      apiCache.invalidate(`ultimo_acceso_corb_${params.idCorbatin}`);
+    }
     const cachedLookupVeh = apiCache.get<CorbatinLookupResult>(`lookup_veh_${params.idVehiculo}`, TTL_LOOKUPS);
     if (cachedLookupVeh) {
       cachedLookupVeh.ultimoAcceso = newAcceso;
@@ -1567,6 +1604,9 @@ export const ApiService = {
 
     // Invalidar únicamente la clave de último acceso (sin purgar lookup_ global)
     apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
+    if (params.idCorbatin) {
+      apiCache.invalidate(`ultimo_acceso_corb_${params.idCorbatin}`);
+    }
     const cachedLookupVeh = apiCache.get<CorbatinLookupResult>(`lookup_veh_${params.idVehiculo}`, TTL_LOOKUPS);
     if (cachedLookupVeh && updatedAcceso) {
       cachedLookupVeh.ultimoAcceso = updatedAcceso;
