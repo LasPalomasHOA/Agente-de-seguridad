@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { View, StyleSheet, ScrollView, Pressable, Modal, Image, useWindowDimensions } from 'react-native';
+import { View, StyleSheet, ScrollView, Pressable, Modal, useWindowDimensions } from 'react-native';
+import { Image } from 'expo-image';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useMobile } from '../context/MobileContext';
@@ -52,7 +53,8 @@ export default function ProfileScreen() {
           <Image
             source={{ uri: agenteActual.avatarUrl }}
             style={{ width: '100%', height: '100%' }}
-            resizeMode="cover"
+            contentFit="cover"
+            cachePolicy="memory-disk"
           />
         ) : (
           <ThemedText style={[styles.avatarText, { color: theme.primary }]}>

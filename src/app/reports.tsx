@@ -6,12 +6,12 @@ import {
   Pressable,
   TextInput,
   Modal,
-  Image,
   useWindowDimensions,
   ViewStyle,
   DimensionValue,
   RefreshControl,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { ThemedText } from '@/components/themed-text';
 import { useRouter } from 'expo-router';
 import { useMobile } from '../context/MobileContext';
@@ -411,7 +411,7 @@ export default function ReportsScreen() {
                     </View>
                     <View style={styles.thumbMiniList}>
                       {rep.evidencias.slice(0, 3).map((ev) => (
-                        <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.cardMiniPhotoThumb} />
+                        <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.cardMiniPhotoThumb} cachePolicy="memory-disk" />
                       ))}
                     </View>
                   </View>
@@ -559,7 +559,7 @@ export default function ReportsScreen() {
                       <View style={styles.modalPhotosGrid}>
                         {selectedReport.evidencias.map((ev) => (
                           <Pressable key={ev.id} onPress={() => setZoomPhoto(ev.fotoUrl)}>
-                            <Image source={{ uri: ev.fotoUrl }} style={styles.modalPhotoThumbLarge} />
+                            <Image source={{ uri: ev.fotoUrl }} style={styles.modalPhotoThumbLarge} cachePolicy="memory-disk" />
                           </Pressable>
                         ))}
                       </View>
@@ -588,7 +588,7 @@ export default function ReportsScreen() {
             <Pressable onPress={() => setZoomPhoto(null)} style={styles.lightboxCloseBtn}>
               <Ionicons name="close" size={28} color="#ffffff" />
             </Pressable>
-            <Image source={{ uri: zoomPhoto }} style={styles.lightboxImage} resizeMode="contain" />
+            <Image source={{ uri: zoomPhoto }} style={styles.lightboxImage} contentFit="contain" cachePolicy="memory-disk" />
           </View>
         </Modal>
       )}

@@ -3,10 +3,10 @@ import {
   View,
   StyleSheet,
   Pressable,
-  Image,
   useWindowDimensions,
   Platform,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as SplashScreen from 'expo-splash-screen';
 import { MobileProvider, useMobile } from '../context/MobileContext';
@@ -77,6 +77,7 @@ function DashboardShell() {
                     'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=200',
                 }}
                 style={styles.officerPhotoAvatar}
+                cachePolicy="memory-disk"
               />
               <View style={styles.onlineBadgeDot} />
             </View>

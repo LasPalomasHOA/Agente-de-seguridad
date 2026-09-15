@@ -5,13 +5,14 @@ import {
   ScrollView,
   Pressable,
   TextInput,
-  Image,
   ActivityIndicator,
   Animated,
   Dimensions,
   Modal,
   Platform,
+  KeyboardAvoidingView,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMobile } from '../context/MobileContext';
 import { ThemedText } from '@/components/themed-text';
@@ -92,6 +93,33 @@ const formatHora = (timeStr?: string | null): string | null => {
   return null;
 };
 
+export const parseSqlUtcDate = (dateStr?: string | null): number => {
+  if (!dateStr || typeof dateStr !== 'string') return Date.now();
+  let clean = dateStr.trim();
+  if (!clean || clean === 'null' || clean === 'undefined') return Date.now();
+
+  // 1. Si viene con espacio entre fecha y hora (ej: "2026-09-15 12:27:45.272-07" o "2026-09-15 19:27:45"), normalizar espacio a 'T'
+  if (clean.includes(' ') && clean.includes('-')) {
+    clean = clean.replace(' ', 'T');
+  }
+
+  // 2. Si el offset de zona horaria es de 2 dígitos sin minutos (ej: "-07" o "+00" al final), normalizar a "-07:00" o "+00:00"
+  clean = clean.replace(/([+-]\d{2})$/, '$1:00');
+
+  // 3. Si no trae zona horaria explícita (+HH:MM, -HH:MM ni Z), los timestamps de SQL/PostgreSQL representan UTC, por lo que agregamos 'Z'
+  if (!clean.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(clean)) {
+    clean = clean + 'Z';
+  }
+
+  // 4. Intentar parseo estándar con ISO 8601 normalizado
+  const ms = new Date(clean).getTime();
+  if (!isNaN(ms)) {
+    return ms;
+  }
+
+  return Date.now();
+};
+
 export default function ScannerScreen() {
   const params = useLocalSearchParams();
   const router = useRouter();
@@ -143,6 +171,15 @@ export default function ScannerScreen() {
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [generatedFolio, setGeneratedFolio] = useState('');
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+
+  // Ticker to dynamically recalculate remaining suspension time in real-time
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNowTick(Date.now());
+    }, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Sync default infraccion when catalog loads
   useEffect(() => {
@@ -462,10 +499,12 @@ export default function ScannerScreen() {
     }
 
     // Tomar la sanción activa más relevante (mayor nivel o más reciente)
-    const sancion = [...sancionesActivas].sort((a, b) => (Number(b.numero_reincidencia) || 1) - (Number(a.numero_reincidencia) || 1))[0];
-    const nivel = Number(sancion.numero_reincidencia) || 1;
-    const fechaInicioMs = new Date(sancion.fecha_inicio || Date.now()).getTime();
-    const ahoraMs = Date.now();
+    const sancion = [...sancionesActivas].sort(
+      (a, b) => (Number(b.numero_reincidencia) || Number(b.id_regla) || 1) - (Number(a.numero_reincidencia) || Number(a.id_regla) || 1)
+    )[0];
+    const nivel = Number(sancion.numero_reincidencia) || Number(sancion.id_regla) || 1;
+    const ahoraMs = nowTick;
+    const fechaInicioMs = parseSqlUtcDate(sancion.fecha_inicio || (sancion as any).created_at);
 
     // ─── 1ª FALTA: Llamado de atención (Banner amarillo informativo, acceso permitido) ───
     if (nivel === 1) {
@@ -475,7 +514,7 @@ export default function ScannerScreen() {
         level: 1,
         levelTitle: '1ª Falta: Llamado de Atención',
         levelBadge: '1ª FALTA',
-        levelName: 'Nivel 1 - Llamado de Atención',
+        levelName: '1ª Falta - Llamado de Atención',
         motivo: sancion.motivo || 'Primer llamado de atención registrado en el sistema.',
         timeRemainingText: 'Informativo',
         fechaFinText: 'Acceso Permitido',
@@ -484,16 +523,17 @@ export default function ScannerScreen() {
       };
     }
 
-    // ─── 2ª FALTA: Suspensión de 1 día (Bloqueo automático de 24 horas) ───
+    // ─── 2ª FALTA: Suspensión temporal de 24 horas (1 Día) ───
     if (nivel === 2) {
-      const fechaFinMs = sancion.fecha_fin
-        ? new Date(sancion.fecha_fin).getTime()
-        : fechaInicioMs + 24 * 60 * 60 * 1000;
+      const fechaFinMs = fechaInicioMs + 24 * 60 * 60 * 1000;
 
       if (ahoraMs < fechaFinMs) {
         const diffMs = fechaFinMs - ahoraMs;
         const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
         const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        const timeRemainingText =
+          totalHours > 0 ? `${totalHours}h ${totalMinutes}m restantes` : `${totalMinutes}m restantes`;
+
         return {
           isBlocked: true,
           isWarning: false,
@@ -501,9 +541,17 @@ export default function ScannerScreen() {
           levelTitle: 'SUSPENSIÓN TEMPORAL (24 HORAS)',
           levelBadge: 'SUSPENSIÓN 24H',
           levelName: '2ª Falta - Suspensión de 1 Día',
-          motivo: sancion.motivo || 'Segunda infracción: suspensión de acceso por 24 horas.',
-          timeRemainingText: `${totalHours}h ${totalMinutes}m restantes`,
-          fechaFinText: new Date(fechaFinMs).toLocaleString(),
+          motivo: sancion.motivo || 'Segunda infracción: suspensión vehicular reglamentaria por 24 horas.',
+          timeRemainingText,
+          fechaFinText: new Date(fechaFinMs).toLocaleString('es-MX', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true,
+          }),
           requiresAdmin: false,
           badgeBg: '#EA580C',
         };
@@ -512,16 +560,22 @@ export default function ScannerScreen() {
       return null;
     }
 
-    // ─── 3ª FALTA: Suspensión de 1 semana (Bloqueo automático de 7 días) ───
+    // ─── 3ª FALTA: Suspensión de 1 semana (Bloqueo reglamentario de 7 días dinámico) ───
     if (nivel === 3) {
-      const fechaFinMs = sancion.fecha_fin
-        ? new Date(sancion.fecha_fin).getTime()
-        : fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
+      const fechaFinMs = fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
 
       if (ahoraMs < fechaFinMs) {
         const diffMs = fechaFinMs - ahoraMs;
         const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-        const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60));
+        const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        const timeRemainingText =
+          totalDays > 0
+            ? `${totalDays}d ${totalHours}h restantes`
+            : totalHours > 0
+            ? `${totalHours}h ${totalMinutes}m restantes`
+            : `${totalMinutes}m restantes`;
+
         return {
           isBlocked: true,
           isWarning: false,
@@ -529,9 +583,17 @@ export default function ScannerScreen() {
           levelTitle: 'SUSPENSIÓN TEMPORAL (7 DÍAS)',
           levelBadge: 'SUSPENSIÓN 7 DÍAS',
           levelName: '3ª Falta - Suspensión de 1 Semana',
-          motivo: sancion.motivo || 'Tercera infracción: suspensión de acceso por 7 días.',
-          timeRemainingText: totalDays > 0 ? `${totalDays}d ${totalHours}h restantes` : `${totalHours}h restantes`,
-          fechaFinText: new Date(fechaFinMs).toLocaleString(),
+          motivo: sancion.motivo || 'Tercera infracción: suspensión vehicular reglamentaria por 7 días.',
+          timeRemainingText,
+          fechaFinText: new Date(fechaFinMs).toLocaleString('es-MX', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true,
+          }),
           requiresAdmin: false,
           badgeBg: '#DC2626',
         };
@@ -548,13 +610,13 @@ export default function ScannerScreen() {
       levelTitle: 'ACCESO RESTRINGIDO PERMANENTE',
       levelBadge: 'LISTA NEGRA',
       levelName: `Nivel ${nivel} - Lista Negra Permanente`,
-      motivo: sancion.motivo || 'Acceso restringido permanente por reincidencia.',
-      timeRemainingText: 'Requiere Administrador',
-      fechaFinText: 'Indefinido (Requiere Administrador HOA)',
+      motivo: sancion.motivo || 'Acceso vehicular restringido permanentemente por reincidencia.',
+      timeRemainingText: 'Permanente',
+      fechaFinText: 'Indefinido (Requiere Comité HOA)',
       requiresAdmin: true,
       badgeBg: '#991B1B',
     };
-  }, [selectedVehicle, selectedCorbatin, sancionesActivas]);
+  }, [selectedVehicle, selectedCorbatin, sancionesActivas, nowTick]);
 
   const isSuspended = !!evaluacionSancion?.isBlocked;
   const hasWarningLevel1 = !!evaluacionSancion?.isWarning;
@@ -723,7 +785,9 @@ export default function ScannerScreen() {
             <View style={{ gap: 16 }}>
               {/* Top Dynamic Alert Full-Width Banner */}
               <View style={[styles.accessDeniedTopBanner, { backgroundColor: evaluacionSancion?.badgeBg || '#DC2626' }]}>
-                <Ionicons name={evaluacionSancion?.requiresAdmin ? 'ban' : 'time'} size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                <View style={styles.accessDeniedIconBadge}>
+                  <Ionicons name={evaluacionSancion?.requiresAdmin ? 'ban' : 'time'} size={18} color="#ffffff" />
+                </View>
                 <ThemedText style={styles.accessDeniedTopBannerText}>
                   {evaluacionSancion?.levelTitle || 'ACCESO DENEGADO'}
                 </ThemedText>
@@ -735,9 +799,9 @@ export default function ScannerScreen() {
                   <Ionicons name="arrow-back" size={16} color="#0f172a" style={{ marginRight: 4 }} />
                   <ThemedText style={styles.volverBtnText}>VOLVER</ThemedText>
                 </Pressable>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <View style={styles.timeBadgeChip}>
                   <Ionicons name="time-outline" size={14} color="#64748B" />
-                  <ThemedText style={styles.lastUpdateText}>
+                  <ThemedText style={styles.timeBadgeChipText}>
                     {evaluacionSancion?.timeRemainingText ? `Tiempo: ${evaluacionSancion.timeRemainingText}` : 'Sanción Vigente'}
                   </ThemedText>
                 </View>
@@ -749,7 +813,8 @@ export default function ScannerScreen() {
                   <Image
                     source={{ uri: selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[1] }}
                     style={styles.suspendedPhotoImg}
-                    resizeMode="cover"
+                    contentFit="cover"
+                    cachePolicy="memory-disk"
                   />
                   <View style={styles.plateTagOverlay}>
                     <ThemedText style={styles.plateTagOverlayText}>{selectedVehicle.placas}</ThemedText>
@@ -757,11 +822,11 @@ export default function ScannerScreen() {
                 </View>
 
                 <View style={styles.suspendedMetaCol}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                     <ThemedText style={styles.suspendedVehicleTitle}>
                       {selectedVehicle.marca} {selectedVehicle.modelo}
                     </ThemedText>
-                    <View style={[styles.suspendedRedBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2' }]}>
+                    <View style={[styles.suspendedRedBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEE2E2' }]}>
                       <View style={[styles.dotRed, { backgroundColor: evaluacionSancion?.badgeBg || '#DC2626' }]} />
                       <ThemedText style={[styles.suspendedRedBadgeText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
                         {evaluacionSancion?.levelBadge || 'SUSPENDIDO'}
@@ -770,17 +835,17 @@ export default function ScannerScreen() {
                   </View>
 
                   <ThemedText style={styles.suspendedCompanyText}>
-                    🏢 {selectedEmpresa?.razon_social || 'Construcciones del Puerto'}
+                    🏢 {selectedEmpresa?.razon_social || 'Constructora Integral del Noroeste S.A. de C.V.'}
                   </ThemedText>
 
                   <View style={styles.suspendedMiniGrid}>
-                    <View style={{ flex: 1 }}>
+                    <View style={styles.suspendedMiniBox}>
                       <ThemedText style={styles.dataLabel}>Conductor Asignado</ThemedText>
                       <ThemedText style={styles.dataValueSmall}>
                         👤 {selectedConductor ? `${selectedConductor.nombre} ${selectedConductor.apellidos}` : 'No Registrado'}
                       </ThemedText>
                     </View>
-                    <View style={{ flex: 1 }}>
+                    <View style={styles.suspendedMiniBox}>
                       <ThemedText style={styles.dataLabel}>Tipo de Pase</ThemedText>
                       <ThemedText style={styles.dataValueSmall}>📄 Contratista Acreditado</ThemedText>
                     </View>
@@ -791,40 +856,55 @@ export default function ScannerScreen() {
               {/* Active Suspension Details Card */}
               <View style={styles.suspensionDetailCard}>
                 <View style={styles.suspensionDetailHeader}>
-                  <View style={[styles.gavelIconBox, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2' }]}>
+                  <View style={[styles.gavelIconBox, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEE2E2' }]}>
                     <Ionicons name="hammer" size={18} color={evaluacionSancion?.badgeBg || '#DC2626'} />
                   </View>
-                  <ThemedText style={styles.suspensionDetailHeading}>Detalles de Sanción Vigente</ThemedText>
-                </View>
-
-                <View style={styles.suspensionDetailRow}>
-                  <View style={{ flex: 2 }}>
-                    <ThemedText style={styles.dataLabel}>Motivo de Infracción</ThemedText>
-                    <View style={styles.motifBox}>
-                      <ThemedText style={styles.motifText}>
-                        {evaluacionSancion?.motivo || 'Falta a la normativa HOA.'}
-                      </ThemedText>
-                    </View>
-                  </View>
                   <View style={{ flex: 1 }}>
-                    <ThemedText style={styles.dataLabel}>Nivel de Falta</ThemedText>
-                    <View style={[styles.reincidenciaBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2', borderColor: evaluacionSancion?.badgeBg || '#DC2626' }]}>
-                      <Ionicons name="warning" size={14} color={evaluacionSancion?.badgeBg || '#DC2626'} style={{ marginRight: 4 }} />
-                      <ThemedText style={[styles.reincidenciaText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
-                        {evaluacionSancion?.levelName || 'Nivel 1'}
-                      </ThemedText>
-                    </View>
+                    <ThemedText style={styles.suspensionDetailHeading}>Detalles de Sanción Vigente</ThemedText>
+                    <ThemedText style={styles.suspensionDetailSubHeading}>Medida disciplinaria y control de acceso</ThemedText>
+                  </View>
+                  <View style={[styles.statusActivePill, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEE2E2' }]}>
+                    <ThemedText style={[styles.statusActivePillText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                      VIGENTE
+                    </ThemedText>
                   </View>
                 </View>
 
+                {/* Nivel de Falta Banner */}
+                <View style={[styles.reincidenciaBanner, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '12' : '#FFF7ED', borderColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '35' : '#FED7AA' }]}>
+                  <Ionicons name="warning" size={18} color={evaluacionSancion?.badgeBg || '#EA580C'} style={{ marginRight: 8 }} />
+                  <View style={{ flex: 1 }}>
+                    <ThemedText style={styles.reincidenciaBannerLabel}>NIVEL DE FALTA APLICADO</ThemedText>
+                    <ThemedText style={[styles.reincidenciaBannerTitle, { color: evaluacionSancion?.badgeBg || '#C2410C' }]}>
+                      {evaluacionSancion?.levelName || '2ª Falta - Suspensión de 1 Día'}
+                    </ThemedText>
+                  </View>
+                </View>
+
+                {/* Motivo de Infracción Section */}
+                <View style={styles.motifSection}>
+                  <ThemedText style={styles.dataLabel}>MOTIVO DE INFRACCIÓN</ThemedText>
+                  <View style={styles.motifBox}>
+                    <Ionicons name="document-text-outline" size={16} color="#64748B" style={{ marginTop: 2, marginRight: 8 }} />
+                    <ThemedText style={styles.motifText}>
+                      {evaluacionSancion?.motivo || 'Falta a la normativa HOA.'}
+                    </ThemedText>
+                  </View>
+                </View>
+
+                {/* Término y Tiempo Restante Footer */}
                 <View style={styles.suspensionVencimientoRow}>
-                  <View>
-                    <ThemedText style={styles.dataLabel}>Término de Sanción</ThemedText>
+                  <View style={styles.vencimientoCol}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 }}>
+                      <Ionicons name="calendar-outline" size={13} color="#64748B" />
+                      <ThemedText style={styles.dataLabel}>TÉRMINO DE SANCIÓN</ThemedText>
+                    </View>
                     <ThemedText style={styles.suspensionVencimientoText}>
                       {evaluacionSancion?.fechaFinText || 'Activa'}
                     </ThemedText>
                   </View>
-                  <View style={[styles.hoursRemainingBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '22' : '#FEE2E2', borderColor: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                  <View style={[styles.hoursRemainingBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEF2F2', borderColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '60' : '#FECACA' }]}>
+                    <Ionicons name="time" size={14} color={evaluacionSancion?.badgeBg || '#DC2626'} style={{ marginRight: 4 }} />
                     <ThemedText style={[styles.hoursRemainingText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
                       {evaluacionSancion?.timeRemainingText || 'En revisión'}
                     </ThemedText>
@@ -836,13 +916,12 @@ export default function ScannerScreen() {
               <Pressable
                 onPress={startReportWizard}
                 style={({ pressed }) => [
-                  styles.reportYellowBtn,
-                  { backgroundColor: '#0D6E5F' },
+                  styles.reportActionBtn,
                   pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
                 ]}
               >
-                <Ionicons name="add-circle-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
-                <ThemedText style={[styles.reportYellowBtnText, { color: '#ffffff' }]}>
+                <Ionicons name="add-circle" size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                <ThemedText style={styles.reportActionBtnText}>
                   REPORTAR NUEVA INFRACCIÓN
                 </ThemedText>
               </Pressable>
@@ -1010,7 +1089,8 @@ export default function ScannerScreen() {
                     <Image
                       source={{ uri: selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[0] }}
                       style={styles.referencePhotoImg}
-                      resizeMode="cover"
+                      contentFit="cover"
+                      cachePolicy="memory-disk"
                     />
                     <View style={styles.photoReferenceFooter}>
                       <ThemedText style={styles.photoReferenceLabel}>Foto de Referencia &bull; Tocar para Zoom</ThemedText>
@@ -1106,135 +1186,146 @@ export default function ScannerScreen() {
 
       {/* ─── 4. WIZARD STEP 1: LEVANTAMIENTO DE INFRACCIÓN (Image 3 Right) ─── */}
       {mode === 'wizard' && step === 1 && selectedVehicle && (
-        <ScrollView contentContainerStyle={styles.scrollPage} showsVerticalScrollIndicator={false}>
-          {/* Header */}
-          <View style={styles.topHeaderBar}>
-            <Pressable onPress={handleBackPress} style={styles.backIconButton}>
-              <Ionicons name="arrow-back" size={22} color="#0f172a" />
-            </Pressable>
-            <View style={styles.headerTitleBox}>
-              <ThemedText style={styles.screenMainTitle}>Levantamiento de Infracción</ThemedText>
-              <ThemedText style={styles.screenSubTitle}>Paso 1 de 3: Selección y detalles</ThemedText>
-            </View>
-          </View>
-
-          {/* Active Context Banner */}
-          <View style={styles.contextActiveBanner}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Ionicons name="warning" size={16} color="#F59E0B" />
-              <ThemedText style={styles.contextActiveTitle}>Infracción en Proceso</ThemedText>
-            </View>
-            <ThemedText style={styles.contextActiveDesc}>
-              {selectedVehicle.marca} {selectedVehicle.modelo} &bull; {selectedVehicle.placas} &bull; Corbatín #{selectedCorbatin?.numero}
-            </ThemedText>
-          </View>
-
-          {/* Catálogo de Infracciones Grid (2x3) */}
-          <ThemedText style={styles.sectionFormTitle}>Catálogo de Infracciones</ThemedText>
-          <View style={styles.catGrid}>
-            {INFRACTION_CATEGORIES.map((cat) => {
-              const isSelected = selectedCategory === cat.id;
-              return (
-                <Pressable
-                  key={cat.id}
-                  onPress={() => {
-                    setSelectedCategory(cat.id);
-                    const matched =
-                      catalogoInfracciones.find((i) => (i.codigo || '').toLowerCase() === cat.defaultCode.toLowerCase()) ||
-                      catalogoInfracciones.find((i) => (i.categoria || '').toLowerCase().includes(cat.id)) ||
-                      catalogoInfracciones[0] ||
-                      {
-                        id_infraccion: 1,
-                        id_reglamento: 1,
-                        codigo: cat.defaultCode,
-                        nombre: cat.name,
-                        descripcion: 'Falta a la normativa',
-                        categoria: cat.name,
-                        activo: true,
-                      };
-                    setSelectedInfraccion(matched);
-                  }}
-                  style={[
-                    styles.catCard,
-                    isSelected && styles.catCardSelected,
-                  ]}
-                >
-                  <Ionicons
-                    name={cat.icon as any}
-                    size={24}
-                    color={isSelected ? '#DC2626' : '#64748B'}
-                  />
-                  <ThemedText style={[styles.catCardText, isSelected && styles.catCardTextSelected]}>
-                    {cat.name}
-                  </ThemedText>
-                  {isSelected && (
-                    <View style={styles.selectedCheckPill}>
-                      <Ionicons name="checkmark" size={10} color="#ffffff" />
-                    </View>
-                  )}
-                </Pressable>
-              );
-            })}
-          </View>
-
-          {/* Detalles del Incidente Form */}
-          <ThemedText style={styles.sectionFormTitle}>Detalles del Incidente</ThemedText>
-          <View style={styles.incidentDetailsCard}>
-            <Select
-              label="Ubicación del Incidente"
-              value={lugar}
-              onValueChange={setLugar}
-              options={[
-                { label: 'Estacionamiento Norte', value: 'Estacionamiento Norte' },
-                { label: 'Estacionamiento Sur', value: 'Estacionamiento Sur' },
-                { label: 'Área de Construcción', value: 'Área de Construcción' },
-                { label: 'Lobby Principal', value: 'Lobby Principal' },
-                { label: 'Alberca / Playa', value: 'Alberca / Playa' },
-                { label: 'Acceso de Proveedores', value: 'Acceso de Proveedores' },
-              ]}
-            />
-
-            <View style={styles.grid2Col}>
-              <View style={styles.dataCol}>
-                <ThemedText style={styles.inputFieldLabel}>Fecha</ThemedText>
-                <View style={styles.dateReadOnlyBox}>
-                  <ThemedText style={styles.dateReadOnlyText}>{fecha}</ThemedText>
-                </View>
-              </View>
-              <View style={styles.dataCol}>
-                <ThemedText style={styles.inputFieldLabel}>Hora</ThemedText>
-                <View style={styles.dateReadOnlyBox}>
-                  <ThemedText style={styles.dateReadOnlyText}>{hora} hrs</ThemedText>
-                </View>
-              </View>
-            </View>
-
-            <View style={{ gap: 6 }}>
-              <ThemedText style={styles.inputFieldLabel}>Descripción Detallada</ThemedText>
-              <TextInput
-                placeholder="Describa brevemente la falta cometida, reincidencia o detalles específicos..."
-                placeholderTextColor="#94a3b8"
-                value={descripcion}
-                onChangeText={setDescripcion}
-                multiline
-                numberOfLines={3}
-                style={styles.formTextArea}
-              />
-            </View>
-          </View>
-
-          {/* Continue Button */}
-          <Pressable
-            onPress={() => setStep(2)}
-            style={({ pressed }) => [
-              styles.navyActionBtn,
-              pressed && { opacity: 0.9 },
-            ]}
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
+          style={{ flex: 1 }}
+        >
+          <ScrollView
+            contentContainerStyle={[styles.scrollPage, { paddingBottom: 280 }]}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
           >
-            <ThemedText style={styles.navyActionBtnText}>Continuar a Evidencias</ThemedText>
-            <Ionicons name="arrow-forward" size={18} color="#ffffff" style={{ marginLeft: 6 }} />
-          </Pressable>
-        </ScrollView>
+            {/* Header */}
+            <View style={styles.topHeaderBar}>
+              <Pressable onPress={handleBackPress} style={styles.backIconButton}>
+                <Ionicons name="arrow-back" size={22} color="#0f172a" />
+              </Pressable>
+              <View style={styles.headerTitleBox}>
+                <ThemedText style={styles.screenMainTitle}>Levantamiento de Infracción</ThemedText>
+                <ThemedText style={styles.screenSubTitle}>Paso 1 de 3: Selección y detalles</ThemedText>
+              </View>
+            </View>
+
+            {/* Active Context Banner */}
+            <View style={styles.contextActiveBanner}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Ionicons name="warning" size={16} color="#F59E0B" />
+                <ThemedText style={styles.contextActiveTitle}>Infracción en Proceso</ThemedText>
+              </View>
+              <ThemedText style={styles.contextActiveDesc}>
+                {selectedVehicle.marca} {selectedVehicle.modelo} &bull; {selectedVehicle.placas} &bull; Corbatín #{selectedCorbatin?.numero}
+              </ThemedText>
+            </View>
+
+            {/* Catálogo de Infracciones Grid (2x3) */}
+            <ThemedText style={styles.sectionFormTitle}>Catálogo de Infracciones</ThemedText>
+            <View style={styles.catGrid}>
+              {INFRACTION_CATEGORIES.map((cat) => {
+                const isSelected = selectedCategory === cat.id;
+                return (
+                  <Pressable
+                    key={cat.id}
+                    onPress={() => {
+                      setSelectedCategory(cat.id);
+                      const matched =
+                        catalogoInfracciones.find((i) => (i.codigo || '').toLowerCase() === cat.defaultCode.toLowerCase()) ||
+                        catalogoInfracciones.find((i) => (i.categoria || '').toLowerCase().includes(cat.id)) ||
+                        catalogoInfracciones[0] ||
+                        {
+                          id_infraccion: 1,
+                          id_reglamento: 1,
+                          codigo: cat.defaultCode,
+                          nombre: cat.name,
+                          descripcion: 'Falta a la normativa',
+                          categoria: cat.name,
+                          activo: true,
+                        };
+                      setSelectedInfraccion(matched);
+                    }}
+                    style={[
+                      styles.catCard,
+                      isSelected && styles.catCardSelected,
+                    ]}
+                  >
+                    <Ionicons
+                      name={cat.icon as any}
+                      size={24}
+                      color={isSelected ? '#DC2626' : '#64748B'}
+                    />
+                    <ThemedText style={[styles.catCardText, isSelected && styles.catCardTextSelected]}>
+                      {cat.name}
+                    </ThemedText>
+                    {isSelected && (
+                      <View style={styles.selectedCheckPill}>
+                        <Ionicons name="checkmark" size={10} color="#ffffff" />
+                      </View>
+                    )}
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {/* Detalles del Incidente Form */}
+            <ThemedText style={styles.sectionFormTitle}>Detalles del Incidente</ThemedText>
+            <View style={styles.incidentDetailsCard}>
+              <Select
+                label="Ubicación del Incidente"
+                value={lugar}
+                onValueChange={setLugar}
+                options={[
+                  { label: 'Estacionamiento Norte', value: 'Estacionamiento Norte' },
+                  { label: 'Estacionamiento Sur', value: 'Estacionamiento Sur' },
+                  { label: 'Área de Construcción', value: 'Área de Construcción' },
+                  { label: 'Lobby Principal', value: 'Lobby Principal' },
+                  { label: 'Alberca / Playa', value: 'Alberca / Playa' },
+                  { label: 'Acceso de Proveedores', value: 'Acceso de Proveedores' },
+                ]}
+              />
+
+              <View style={styles.grid2Col}>
+                <View style={styles.dataCol}>
+                  <ThemedText style={styles.inputFieldLabel}>Fecha</ThemedText>
+                  <View style={styles.dateReadOnlyBox}>
+                    <ThemedText style={styles.dateReadOnlyText}>{fecha}</ThemedText>
+                  </View>
+                </View>
+                <View style={styles.dataCol}>
+                  <ThemedText style={styles.inputFieldLabel}>Hora</ThemedText>
+                  <View style={styles.dateReadOnlyBox}>
+                    <ThemedText style={styles.dateReadOnlyText}>{hora} hrs</ThemedText>
+                  </View>
+                </View>
+              </View>
+
+              <View style={{ gap: 6 }}>
+                <ThemedText style={styles.inputFieldLabel}>Descripción Detallada</ThemedText>
+                <TextInput
+                  placeholder="Describa brevemente la falta cometida, reincidencia o detalles específicos..."
+                  placeholderTextColor="#94a3b8"
+                  value={descripcion}
+                  onChangeText={setDescripcion}
+                  multiline
+                  numberOfLines={4}
+                  style={styles.formTextArea}
+                />
+              </View>
+            </View>
+
+            {/* Continue Button */}
+            <Pressable
+              onPress={() => setStep(2)}
+              style={({ pressed }) => [
+                styles.navyActionBtn,
+                pressed && { opacity: 0.9 },
+              ]}
+            >
+              <ThemedText style={styles.navyActionBtnText}>Continuar a Evidencias</ThemedText>
+              <Ionicons name="arrow-forward" size={18} color="#ffffff" style={{ marginLeft: 6 }} />
+            </Pressable>
+          </ScrollView>
+        </KeyboardAvoidingView>
       )}
 
       {/* ─── 5. WIZARD STEP 2: EVIDENCIA FOTOGRÁFICA (Image 4 Left) ─── */}
@@ -1278,7 +1369,7 @@ export default function ScannerScreen() {
                 <View key={index} style={styles.photoSlotBox}>
                   {photo ? (
                     <View style={styles.photoSlotFilled}>
-                      <Image source={{ uri: photo.fotoUrl }} style={styles.photoSlotImg} />
+                      <Image source={{ uri: photo.fotoUrl }} style={styles.photoSlotImg} cachePolicy="memory-disk" />
                       <Pressable
                         onPress={() => handleDeletePhoto(photo.id)}
                         style={styles.deletePhotoSlotBtn}
@@ -1382,7 +1473,7 @@ export default function ScannerScreen() {
             <ThemedText style={styles.reviewCardTitle}>Evidencias Adjuntas ({evidencias.length})</ThemedText>
             <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
               {evidencias.map((ev) => (
-                <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.reviewPhotoThumb} />
+                <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.reviewPhotoThumb} cachePolicy="memory-disk" />
               ))}
             </View>
           </View>
@@ -1516,7 +1607,8 @@ export default function ScannerScreen() {
               <Image
                 source={{ uri: lightboxPhoto }}
                 style={styles.lightboxImg}
-                resizeMode="contain"
+                contentFit="contain"
+                cachePolicy="memory-disk"
               />
 
               <View style={styles.lightboxFooter}>
@@ -2635,15 +2727,28 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 12,
-    borderRadius: 12,
-    marginHorizontal: -Spacing.three,
-    marginTop: -Spacing.three,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  accessDeniedIconBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
   },
   accessDeniedTopBannerText: {
     color: '#ffffff',
-    fontSize: 15,
+    fontSize: 14.5,
     fontWeight: '900',
-    letterSpacing: 0.8,
+    letterSpacing: 0.6,
   },
   subHeaderBar: {
     flexDirection: 'row',
@@ -2665,10 +2770,21 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0f172a',
   },
-  lastUpdateText: {
-    fontSize: 11,
-    color: '#64748B',
-    fontWeight: '500',
+  timeBadgeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    gap: 5,
+  },
+  timeBadgeChipText: {
+    fontSize: 11.5,
+    color: '#475569',
+    fontWeight: '700',
   },
   suspendedVehicleCard: {
     backgroundColor: '#ffffff',
@@ -2677,8 +2793,13 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: '#E2E8F0',
     flexDirection: 'row',
-    gap: 16,
+    gap: 14,
     flexWrap: 'wrap',
+    shadowColor: '#0f172a',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
   },
   suspendedPhotoCol: {
     width: 140,
@@ -2711,7 +2832,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   suspendedVehicleTitle: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '900',
     color: '#0f172a',
   },
@@ -2742,100 +2863,157 @@ const styles = StyleSheet.create({
   },
   suspendedMiniGrid: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
     marginTop: 4,
+  },
+  suspendedMiniBox: {
+    flex: 1,
+    minWidth: 110,
+    backgroundColor: '#F8FAFC',
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   dataValueSmall: {
     fontSize: 12,
     fontWeight: '700',
     color: '#0f172a',
-    marginTop: 1,
+    marginTop: 2,
   },
   suspensionDetailCard: {
-    backgroundColor: '#FFF5F5',
+    backgroundColor: '#ffffff',
     borderRadius: 16,
-    padding: 18,
+    padding: 16,
     borderWidth: 1.5,
-    borderColor: '#FECACA',
+    borderColor: '#FEE2E2',
     gap: 12,
+    shadowColor: '#991B1B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
   suspensionDetailHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
   },
   gavelIconBox: {
-    width: 28,
-    height: 28,
+    width: 32,
+    height: 32,
     borderRadius: 8,
-    backgroundColor: '#DC2626',
+    backgroundColor: '#FEF2F2',
     alignItems: 'center',
     justifyContent: 'center',
   },
   suspensionDetailHeading: {
-    fontSize: 14,
+    fontSize: 14.5,
     fontWeight: '900',
-    color: '#991B1B',
+    color: '#0F172A',
   },
-  suspensionDetailRow: {
-    flexDirection: 'row',
-    gap: 12,
+  suspensionDetailSubHeading: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '500',
+    marginTop: 1,
   },
-  motifBox: {
-    backgroundColor: '#ffffff',
-    padding: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#FECACA',
-    marginTop: 4,
+  statusActivePill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
   },
-  motifText: {
-    fontSize: 12,
-    color: '#7F1D1D',
-    fontWeight: '600',
+  statusActivePillText: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.4,
   },
-  reincidenciaBadge: {
+  reincidenciaBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FEF2F2',
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    borderRadius: 8,
+    padding: 12,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#F87171',
-    marginTop: 4,
   },
-  reincidenciaText: {
-    color: '#DC2626',
-    fontSize: 12,
+  reincidenciaBannerLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 0.5,
+  },
+  reincidenciaBannerTitle: {
+    fontSize: 13,
     fontWeight: '900',
+    marginTop: 1,
+  },
+  motifSection: {
+    gap: 4,
+  },
+  motifBox: {
+    flexDirection: 'row',
+    backgroundColor: '#F8FAFC',
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginTop: 2,
+  },
+  motifText: {
+    flex: 1,
+    fontSize: 12.5,
+    lineHeight: 18,
+    color: '#334155',
+    fontWeight: '600',
   },
   suspensionVencimientoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     borderTopWidth: 1,
-    borderTopColor: '#FECACA',
-    paddingTop: 10,
+    borderTopColor: '#F1F5F9',
+    paddingTop: 12,
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  vencimientoCol: {
+    flex: 1,
+    minWidth: 140,
   },
   suspensionVencimientoText: {
     fontSize: 13,
     fontWeight: '900',
-    color: '#0f172a',
-    marginTop: 1,
+    color: '#0F172A',
   },
   hoursRemainingBadge: {
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#FECACA',
   },
   hoursRemainingText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#991B1B',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  reportActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 48,
+    backgroundColor: '#0D6E5F',
+    borderRadius: 12,
+    shadowColor: '#0D6E5F',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  reportActionBtnText: {
+    color: '#ffffff',
+    fontSize: 13.5,
+    fontWeight: '900',
+    letterSpacing: 0.3,
   },
   lightboxOverlay: {
     flex: 1,

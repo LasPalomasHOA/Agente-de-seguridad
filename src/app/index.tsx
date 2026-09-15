@@ -5,12 +5,12 @@ import {
   ScrollView,
   Pressable,
   TextInput,
-  Image,
   Dimensions,
   Modal,
   Animated,
   Platform,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMobile } from '../context/MobileContext';
 import { ThemedText } from '@/components/themed-text';
@@ -143,6 +143,7 @@ export default function HomeDashboard() {
               <Image
                 source={{ uri: agenteActual.avatarUrl || 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=200' }}
                 style={styles.heroAvatarImg}
+                cachePolicy="memory-disk"
               />
               <View style={styles.heroLiveDot} />
             </View>
@@ -388,7 +389,7 @@ export default function HomeDashboard() {
                       </ThemedText>
                       <View style={styles.modalPhotosRow}>
                         {selectedReport.evidencias.map((ev: Evidencia) => (
-                          <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.modalPhotoThumb} />
+                          <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.modalPhotoThumb} cachePolicy="memory-disk" />
                         ))}
                       </View>
                     </View>

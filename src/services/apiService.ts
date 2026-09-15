@@ -53,6 +53,59 @@ export interface CorbatinLookupResult {
   ultimoAcceso?: BitacoraAccesoRow | null;
 }
 
+// Almacenamiento seguro y persistente para caché entre sesiones y recargas
+const memoryStorageMap = new Map<string, string>();
+
+export const safeStorage = {
+  getItem: (key: string): string | null => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        return window.localStorage.getItem(key);
+      }
+    } catch { }
+    return memoryStorageMap.get(key) || null;
+  },
+  setItem: (key: string, value: string): void => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(key, value);
+      }
+    } catch { }
+    memoryStorageMap.set(key, value);
+  },
+  removeItem: (key: string): void => {
+    try {
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(key);
+      }
+    } catch { }
+    memoryStorageMap.delete(key);
+  },
+};
+
+/**
+ * Gestor de caché local para imágenes pesadas y Base64 de vehículos y usuarios
+ * (Evita re-descargas masivas de 50KB por auto en cada consulta SQL/REST)
+ */
+export const ImageCacheStore = {
+  getVehiclePhoto(idVehiculo: number | string): string | null {
+    if (!idVehiculo) return null;
+    return safeStorage.getItem(`hoa_photo_veh_${idVehiculo}`);
+  },
+  setVehiclePhoto(idVehiculo: number | string, photoUrl: string): void {
+    if (!idVehiculo || !photoUrl || photoUrl.length < 50) return;
+    safeStorage.setItem(`hoa_photo_veh_${idVehiculo}`, photoUrl);
+  },
+  getUserAvatar(idUsuario: number | string): string | null {
+    if (!idUsuario) return null;
+    return safeStorage.getItem(`hoa_photo_user_${idUsuario}`);
+  },
+  setUserAvatar(idUsuario: number | string, avatarUrl: string): void {
+    if (!idUsuario || !avatarUrl || avatarUrl.length < 50) return;
+    safeStorage.setItem(`hoa_photo_user_${idUsuario}`, avatarUrl);
+  },
+};
+
 // Caché de ETags HTTP para respuestas 304 Not Modified (0 bytes de payload de red)
 const httpEtagCache = new Map<string, { etag: string; data: any }>();
 
@@ -67,7 +120,16 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
 
   // Cabecera condicional para ahorro de Egress
   if (isGet) {
-    const cachedEntry = httpEtagCache.get(url);
+    let cachedEntry = httpEtagCache.get(url);
+    if (!cachedEntry) {
+      try {
+        const stored = safeStorage.getItem(`hoa_etag_${url}`);
+        if (stored) {
+          cachedEntry = JSON.parse(stored);
+          if (cachedEntry) httpEtagCache.set(url, cachedEntry);
+        }
+      } catch { }
+    }
     if (cachedEntry?.etag) {
       headers['If-None-Match'] = cachedEntry.etag;
     }
@@ -104,7 +166,11 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
     if (isGet) {
       const etag = res.headers.get('etag') || res.headers.get('ETag');
       if (etag) {
-        httpEtagCache.set(url, { etag, data });
+        const entry = { etag, data };
+        httpEtagCache.set(url, entry);
+        try {
+          safeStorage.setItem(`hoa_etag_${url}`, JSON.stringify(entry));
+        } catch { }
       }
     }
 
@@ -116,36 +182,6 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
     }
     throw err;
   }
-};
-
-// Almacenamiento seguro y persistente para caché entre sesiones y recargas
-const memoryStorageMap = new Map<string, string>();
-
-const safeStorage = {
-  getItem: (key: string): string | null => {
-    try {
-      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-        return window.localStorage.getItem(key);
-      }
-    } catch { }
-    return memoryStorageMap.get(key) || null;
-  },
-  setItem: (key: string, value: string): void => {
-    try {
-      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(key, value);
-      }
-    } catch { }
-    memoryStorageMap.set(key, value);
-  },
-  removeItem: (key: string): void => {
-    try {
-      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.removeItem(key);
-      }
-    } catch { }
-    memoryStorageMap.delete(key);
-  },
 };
 
 // Caché multinivel con TTL y deduplicación de peticiones concurrentes (In-Flight Request Coalescing)
@@ -282,9 +318,10 @@ export const apiCache = new PersistentApiCache();
 // TTL Constants optimizados (en milisegundos) para reducción masiva de Egress
 const TTL_STATIC_CATALOGS = 30 * 60 * 1000;      // 30 minutos para catálogos y reglamentos
 const TTL_USERS = 15 * 60 * 1000;                 // 15 minutos para usuarios
-const TTL_VEHICLES_CORBATINES = 5 * 60 * 1000;    // 5 minutos para listas acotadas
-const TTL_LOOKUPS = 5 * 60 * 1000;               // 5 minutos para resultados de búsqueda específicos
+const TTL_VEHICLES_CORBATINES = 15 * 60 * 1000;   // 15 minutos para catálogos estáticos de vehículos y corbatines
+const TTL_LOOKUPS = 10 * 60 * 1000;               // 10 minutos para metadata estática de vehículos/corbatines
 const TTL_REPORTES = 2 * 60 * 1000;              // 2 minutos para reportes del oficial
+const TTL_SANCIONES = 30 * 1000;                 // 30 segundos para consulta de sanciones activas
 
 export const getLocalDateStr = (d = new Date()): string => {
   const year = d.getFullYear();
@@ -675,12 +712,19 @@ export const ApiService = {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
         if (cachedResult && cachedResult.vehiculo && Number(cachedResult.vehiculo.id_vehiculo) > 0) {
           // El vehículo y corbatín son estáticos (ahorro masivo de egress),
-          // pero el último acceso vehicular siempre se consulta en vivo
-          const liveAcceso = await this.getUltimoAcceso(
-            cachedResult.vehiculo.id_vehiculo,
-            cachedResult.corbatin?.id_corbatin
-          );
+          // pero el último acceso vehicular y las sanciones siempre se consultan en vivo
+          const [liveAcceso, liveSanciones] = await Promise.all([
+            this.getUltimoAcceso(
+              cachedResult.vehiculo.id_vehiculo,
+              cachedResult.corbatin?.id_corbatin
+            ),
+            this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo }),
+          ]);
           cachedResult.ultimoAcceso = liveAcceso || null;
+          if (liveSanciones) {
+            cachedResult.sancionesActivas = (liveSanciones || [])
+              .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo');
+          }
           return cachedResult;
         }
       }
@@ -855,6 +899,17 @@ export const ApiService = {
         motivo_cancelacion: null,
       };
 
+      // Gestión y caché local de imagen del vehículo
+      let finalFotoUrl = matchedVehiculo?.foto_url || matchedVehiculo?.foto;
+      if (finalFotoUrl && finalFotoUrl.length > 50) {
+        ImageCacheStore.setVehiclePhoto(matchedVehiculo?.id_vehiculo || 0, finalFotoUrl);
+      } else if (!finalFotoUrl && matchedVehiculo?.id_vehiculo) {
+        const cachedPhoto = ImageCacheStore.getVehiclePhoto(matchedVehiculo.id_vehiculo);
+        if (cachedPhoto) {
+          finalFotoUrl = cachedPhoto;
+        }
+      }
+
       const vehiculoRow: VehiculoRow = {
         id_vehiculo: matchedVehiculo?.id_vehiculo || 0,
         id_empresa: matchedVehiculo?.id_empresa || 1,
@@ -864,8 +919,7 @@ export const ApiService = {
         placas: matchedVehiculo?.placas || matchedVehiculo?.placa || 'SIN-PLACA',
         color: matchedVehiculo?.color || 'Blanco',
         foto_url:
-          matchedVehiculo?.foto_url ||
-          matchedVehiculo?.foto ||
+          finalFotoUrl ||
           'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
         estatus_acceso: matchedVehiculo?.estatus_acceso || 'HABILITADO',
         created_at: matchedVehiculo?.created_at || new Date().toISOString(),
@@ -901,10 +955,14 @@ export const ApiService = {
         };
       }
 
-      // Sanciones, conteo de infracciones y último acceso vehicular en paralelo
+      // Sanciones, conteo de infracciones y último acceso vehicular en paralelo sin redundancia
       const [todasSanciones, totalInfracciones, ultimoAcceso] = await Promise.all([
-        this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
-        this.getReportesCount({ idVehiculo: vehiculoRow.id_vehiculo }),
+        matchedVehiculo?.sanciones && Array.isArray(matchedVehiculo.sanciones)
+          ? Promise.resolve(matchedVehiculo.sanciones)
+          : this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
+        typeof matchedVehiculo?.infracciones_count === 'number'
+          ? Promise.resolve(matchedVehiculo.infracciones_count)
+          : this.getReportesCount({ idVehiculo: vehiculoRow.id_vehiculo }),
         this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin),
       ]);
 
@@ -1036,7 +1094,7 @@ export const ApiService = {
             const { data } = await supabase
               .from('reglamentos')
               .select(PROJECTIONS.REGLAMENTOS)
-              .eq('vigente', true)
+              .order('vigente', { ascending: false })
               .limit(50);
             if (data && Array.isArray(data)) {
               return data as ReglamentoRow[];
@@ -1226,6 +1284,15 @@ export const ApiService = {
       if (typeof res?.total === 'number') {
         apiCache.set(cacheKey, res.total);
         return res.total;
+      }
+      if (Array.isArray(res)) {
+        const count = idVehiculo
+          ? res.filter((r: any) => Number(r.id_vehiculo) === Number(idVehiculo)).length
+          : idUsuario
+          ? res.filter((r: any) => Number(r.id_usuario) === Number(idUsuario)).length
+          : res.length;
+        apiCache.set(cacheKey, count);
+        return count;
       }
     } catch { }
 
@@ -1714,13 +1781,19 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene vehículos con proyección ligera
+   * Obtiene vehículos con proyección ligera y persistencia de fotos en ImageCacheStore
    */
   async getVehiculos(): Promise<VehiculoRow[]> {
     return apiCache.getOrFetch('vehiculos_list', TTL_VEHICLES_CORBATINES, async () => {
       try {
         const data = await fetchJson('/vehiculos?limit=50');
         if (Array.isArray(data)) {
+          data.forEach((v: any) => {
+            const f = v.foto_url || v.foto;
+            if (f && f.length > 50 && v.id_vehiculo) {
+              ImageCacheStore.setVehiclePhoto(v.id_vehiculo, f);
+            }
+          });
           return data;
         }
       } catch {
@@ -1730,7 +1803,10 @@ export const ApiService = {
             .select(PROJECTIONS.VEHICULOS_LIGHT)
             .limit(50);
           if (data && Array.isArray(data)) {
-            return data as VehiculoRow[];
+            return data.map((v: any) => ({
+              ...v,
+              foto_url: ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || v.foto_url,
+            })) as VehiculoRow[];
           }
         }
       }
