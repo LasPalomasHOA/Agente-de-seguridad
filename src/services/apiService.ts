@@ -777,13 +777,26 @@ export const ApiService = {
       for (const key of aliasKeys) {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
         if (cachedResult && cachedResult.vehiculo && Number(cachedResult.vehiculo.id_vehiculo) > 0) {
-          // El vehículo y corbatín son estáticos (ahorro masivo de egress),
-          // pero el último acceso vehicular y las sanciones siempre se consultan en vivo
-          const liveAcceso = await this.getUltimoAcceso(
-            cachedResult.vehiculo.id_vehiculo,
-            cachedResult.corbatin?.id_corbatin
-          );
+          // Consultar en vivo el último acceso y las sanciones activas
+          const [liveAcceso, liveSanciones] = await Promise.all([
+            this.getUltimoAcceso(
+              cachedResult.vehiculo.id_vehiculo,
+              cachedResult.corbatin?.id_corbatin
+            ),
+            this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: true }),
+          ]);
+
           cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
+          // Si en la web se aprobó una infracción, aquí se reflejará de inmediato:
+          if (Array.isArray(liveSanciones)) {
+            cachedResult.sancionesActivas = liveSanciones
+              .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo')
+              .map((s: any) => ({
+                ...s,
+                estatus: (s.estatus?.toLowerCase() as any) || 'activa',
+              }));
+          }
+
           return cachedResult;
         }
       }
@@ -1282,19 +1295,21 @@ export const ApiService = {
         } catch { }
       }
 
-      // Invalidación selectiva y granular: preserva las consultas de otros usuarios y vehículos
+      // Invalidación selectiva y granular
       if (params.idUsuario) {
-        // Invalida cualquier lista o conteo de este oficial (sin importar el limit o vehículo)
         apiCache.invalidate(`reportes_list_${params.idUsuario}`);
         apiCache.invalidate(`reportes_count_all_${params.idUsuario}`);
       }
 
       if (params.idVehiculo) {
-        // Invalida búsquedas, conteos y sanciones específicas de este vehículo
-        apiCache.invalidate(`lookup_veh_${params.idVehiculo}`);
+        // Invalida conteos y sanciones específicas
         apiCache.invalidate(`reportes_count_${params.idVehiculo}`);
         apiCache.invalidate(`sanciones_list_${params.idVehiculo}`);
         apiCache.invalidate(`reportes_list_all_${params.idVehiculo}`);
+        apiCache.invalidate(`lookup_veh_${params.idVehiculo}`);
+
+        // Purgar cualquier lookup previo para forzar recálculo de sanciones en escaneo
+        apiCache.invalidate('lookup_');
       }
 
       if (params.idCorbatin) {
@@ -1936,7 +1951,7 @@ export const ApiService = {
 
     return apiCache.getOrFetch(
       cacheKey,
-      TTL_VEHICLES_CORBATINES,
+      TTL_SANCIONES,
       async () => {
         try {
           const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}&limit=20` : '?limit=20';

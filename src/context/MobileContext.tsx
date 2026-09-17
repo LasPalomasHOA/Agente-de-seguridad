@@ -135,11 +135,26 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         ? idUsuario
         : (currentAgenteId ? parseInt(currentAgenteId.replace(/\D/g, ''), 10) : undefined);
 
-      const dbReportes = await SupabaseService.getReportes({
-        idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
-        limit: 30,
-        forceRefresh,
-      });
+      const [dbReportes, corbatinesList] = await Promise.all([
+        SupabaseService.getReportes({
+          idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
+          limit: 30,
+          forceRefresh,
+        }),
+        SupabaseService.getCorbatines().catch(() => []),
+      ]);
+
+      const corbatinMap = new Map<number, number>();
+      const vehiculoCorbatinMap = new Map<number, number>();
+      if (Array.isArray(corbatinesList)) {
+        corbatinesList.forEach((c: any) => {
+          if (c && c.numero !== undefined && c.numero !== null) {
+            if (c.id_corbatin) corbatinMap.set(Number(c.id_corbatin), Number(c.numero));
+            if (c.id_vehiculo) vehiculoCorbatinMap.set(Number(c.id_vehiculo), Number(c.numero));
+          }
+        });
+      }
+
       if (dbReportes && dbReportes.length > 0) {
         const mapped: ReporteInfraccion[] = dbReportes.map((r: any) => {
           const statusLower = (r.estatus_revision || '').toLowerCase();
@@ -151,11 +166,22 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             ? 'borrador'
             : 'pendiente';
 
+          const resolvedNumero =
+            r.corbatin?.numero ??
+            r.corbatines?.numero ??
+            r.numero ??
+            (r.id_corbatin ? corbatinMap.get(Number(r.id_corbatin)) : undefined) ??
+            (r.id_vehiculo ? vehiculoCorbatinMap.get(Number(r.id_vehiculo)) : undefined);
+
+          const corbatinNumeroStr = resolvedNumero !== undefined && resolvedNumero !== null
+            ? `C-${resolvedNumero}`
+            : (r.id_corbatin ? `C-${r.id_corbatin}` : 'S/C');
+
           return {
             id: `rep_${r.id_reporte}`,
             folio: `F-2026-${String(r.id_reporte).padStart(4, '0')}`,
             vehiculoId: String(r.id_vehiculo),
-            corbatinNumero: r.corbatin?.numero ? `C-${r.corbatin.numero}` : (r.id_corbatin ? `C-${r.id_corbatin}` : 'S/C'),
+            corbatinNumero: corbatinNumeroStr,
             infraccionCodigo: r.infraccion?.codigo || r.catalogo_infracciones?.codigo || 'INF-01',
             lugar: r.ubicacion_texto || 'Área Común',
             fecha: (r.fecha_hora || '').split('T')[0] || new Date().toISOString().split('T')[0],

@@ -558,14 +558,10 @@ export default function ScannerScreen() {
           levelName: '2ª Falta - Suspensión de 1 Día',
           motivo: sancion.motivo || 'Segunda infracción: suspensión vehicular reglamentaria por 24 horas.',
           timeRemainingText,
-          fechaFinText: new Date(fechaFinMs).toLocaleString('es-MX', {
+          fechaFinText: new Date(fechaFinMs).toLocaleDateString('es-MX', {
             day: '2-digit',
             month: '2-digit',
             year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true,
           }),
           requiresAdmin: false,
           badgeBg: '#EA580C',
@@ -600,14 +596,10 @@ export default function ScannerScreen() {
           levelName: '3ª Falta - Suspensión de 1 Semana',
           motivo: sancion.motivo || 'Tercera infracción: suspensión vehicular reglamentaria por 7 días.',
           timeRemainingText,
-          fechaFinText: new Date(fechaFinMs).toLocaleString('es-MX', {
+          fechaFinText: new Date(fechaFinMs).toLocaleDateString('es-MX', {
             day: '2-digit',
             month: '2-digit',
             year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true,
           }),
           requiresAdmin: false,
           badgeBg: '#DC2626',
@@ -808,18 +800,12 @@ export default function ScannerScreen() {
                 </ThemedText>
               </View>
 
-              {/* Sub-bar with Volver and Timestamp */}
+              {/* Sub-bar with Volver */}
               <View style={styles.subHeaderBar}>
                 <Pressable onPress={handleBackPress} style={styles.volverBtn}>
                   <Ionicons name="arrow-back" size={16} color="#0f172a" style={{ marginRight: 4 }} />
                   <ThemedText style={styles.volverBtnText}>VOLVER</ThemedText>
                 </Pressable>
-                <View style={styles.timeBadgeChip}>
-                  <Ionicons name="time-outline" size={14} color="#64748B" />
-                  <ThemedText style={styles.timeBadgeChipText}>
-                    {evaluacionSancion?.timeRemainingText ? `Tiempo: ${evaluacionSancion.timeRemainingText}` : 'Sanción Vigente'}
-                  </ThemedText>
-                </View>
               </View>
 
               {/* Suspended Vehicle Card with Photo on Left */}
@@ -907,7 +893,7 @@ export default function ScannerScreen() {
                   </View>
                 </View>
 
-                {/* Término y Tiempo Restante Footer */}
+                {/* Término de Sanción */}
                 <View style={styles.suspensionVencimientoRow}>
                   <View style={styles.vencimientoCol}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 2 }}>
@@ -916,12 +902,6 @@ export default function ScannerScreen() {
                     </View>
                     <ThemedText style={styles.suspensionVencimientoText}>
                       {evaluacionSancion?.fechaFinText || 'Activa'}
-                    </ThemedText>
-                  </View>
-                  <View style={[styles.hoursRemainingBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEF2F2', borderColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '60' : '#FECACA' }]}>
-                    <Ionicons name="time" size={14} color={evaluacionSancion?.badgeBg || '#DC2626'} style={{ marginRight: 4 }} />
-                    <ThemedText style={[styles.hoursRemainingText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
-                      {evaluacionSancion?.timeRemainingText || 'En revisión'}
                     </ThemedText>
                   </View>
                 </View>
