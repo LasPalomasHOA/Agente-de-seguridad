@@ -10,6 +10,7 @@ import {
   ViewStyle,
   DimensionValue,
   RefreshControl,
+  ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { ThemedText } from '@/components/themed-text';
@@ -18,6 +19,7 @@ import { useMobile } from '../context/MobileContext';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
 import { ReporteInfraccion } from '../types/reporte';
+import { SupabaseService } from '../services/supabaseService';
 
 export default function ReportsScreen() {
   const router = useRouter();
@@ -44,6 +46,34 @@ export default function ReportsScreen() {
   const [dateFilter, setDateFilter] = useState('');
   const [selectedReport, setSelectedReport] = useState<ReporteInfraccion | null>(null);
   const [zoomPhoto, setZoomPhoto] = useState<string | null>(null);
+  const [loadingPhotos, setLoadingPhotos] = useState(false);
+
+  // Carga diferida (lazy loading) al abrir el expediente
+  const handleOpenReportModal = async (rep: ReporteInfraccion) => {
+    setSelectedReport(rep);
+
+    if (rep.evidencias && rep.evidencias.length > 0) {
+      const faltanFotos = rep.evidencias.some((ev) => !ev.fotoUrl);
+      if (faltanFotos) {
+        setLoadingPhotos(true);
+        try {
+          const evidenciasActualizadas = await Promise.all(
+            rep.evidencias.map(async (ev) => {
+              if (ev.fotoUrl) return ev;
+              const fotoBase64 = await SupabaseService.getEvidenciaFoto(ev.id);
+              return {
+                ...ev,
+                fotoUrl: fotoBase64 || '',
+              };
+            })
+          );
+          setSelectedReport((prev) => (prev ? { ...prev, evidencias: evidenciasActualizadas } : null));
+        } finally {
+          setLoadingPhotos(false);
+        }
+      }
+    }
+  };
 
   const misReportes = useMemo(
     () => reportes.filter((r) => r.agenteId === agenteActual.id),
@@ -321,15 +351,15 @@ export default function ReportsScreen() {
             const leftColor = isAprobado
               ? '#10B981'
               : isRechazado
-              ? '#EF4444'
-              : isBorrador
-              ? '#94A3B8'
-              : '#F59E0B';
+                ? '#EF4444'
+                : isBorrador
+                  ? '#94A3B8'
+                  : '#F59E0B';
 
             return (
               <Pressable
                 key={rep.id}
-                onPress={() => setSelectedReport(rep)}
+                onPress={() => handleOpenReportModal(rep)}
                 style={({ pressed }) => [
                   styles.reportGridCard,
                   getCardStyle(),
@@ -473,8 +503,8 @@ export default function ReportsScreen() {
                           selectedReport.estado === 'aprobado'
                             ? '#ECFDF5'
                             : selectedReport.estado === 'rechazado'
-                            ? '#FEF2F2'
-                            : '#FEF3C7',
+                              ? '#FEF2F2'
+                              : '#FEF3C7',
                       },
                     ]}
                   >
@@ -483,16 +513,16 @@ export default function ReportsScreen() {
                         selectedReport.estado === 'aprobado'
                           ? 'checkmark-circle'
                           : selectedReport.estado === 'rechazado'
-                          ? 'close-circle'
-                          : 'time'
+                            ? 'close-circle'
+                            : 'time'
                       }
                       size={18}
                       color={
                         selectedReport.estado === 'aprobado'
                           ? '#059669'
                           : selectedReport.estado === 'rechazado'
-                          ? '#DC2626'
-                          : '#D97706'
+                            ? '#DC2626'
+                            : '#D97706'
                       }
                       style={{ marginRight: 6 }}
                     />
@@ -504,8 +534,8 @@ export default function ReportsScreen() {
                             selectedReport.estado === 'aprobado'
                               ? '#059669'
                               : selectedReport.estado === 'rechazado'
-                              ? '#DC2626'
-                              : '#D97706',
+                                ? '#DC2626'
+                                : '#D97706',
                         },
                       ]}
                     >
@@ -550,19 +580,35 @@ export default function ReportsScreen() {
                     </ThemedText>
                   </View>
 
-                  {/* Evidencias Grid with zoom on tap */}
+                  {/* Evidencias Grid con indicador de carga y zoom */}
                   {selectedReport.evidencias && selectedReport.evidencias.length > 0 && (
                     <View style={styles.modalInfoBox}>
                       <ThemedText style={styles.modalInfoLabel}>
                         EVIDENCIAS FOTOGRÁFICAS ({selectedReport.evidencias.length}) - TOCAR PARA ZOOM
                       </ThemedText>
-                      <View style={styles.modalPhotosGrid}>
-                        {selectedReport.evidencias.map((ev) => (
-                          <Pressable key={ev.id} onPress={() => setZoomPhoto(ev.fotoUrl)}>
-                            <Image source={{ uri: ev.fotoUrl }} style={styles.modalPhotoThumbLarge} cachePolicy="memory-disk" />
-                          </Pressable>
-                        ))}
-                      </View>
+
+                      {loadingPhotos ? (
+                        <View style={{ paddingVertical: 18, alignItems: 'center', justifyContent: 'center' }}>
+                          <ActivityIndicator size="small" color="#0D6E5F" />
+                          <ThemedText style={{ fontSize: 11, color: '#64748B', marginTop: 4 }}>
+                            Cargando fotografías...
+                          </ThemedText>
+                        </View>
+                      ) : (
+                        <View style={styles.modalPhotosGrid}>
+                          {selectedReport.evidencias.map((ev) =>
+                            ev.fotoUrl ? (
+                              <Pressable key={ev.id} onPress={() => setZoomPhoto(ev.fotoUrl)}>
+                                <Image
+                                  source={{ uri: ev.fotoUrl }}
+                                  style={styles.modalPhotoThumbLarge}
+                                  cachePolicy="memory-disk"
+                                />
+                              </Pressable>
+                            ) : null
+                          )}
+                        </View>
+                      )}
                     </View>
                   )}
                 </View>

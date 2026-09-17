@@ -50,8 +50,11 @@ export default function ReglamentoScreen() {
   }, []);
 
   useEffect(() => {
-    fetchReglamentosFromDb(false);
-  }, [fetchReglamentosFromDb]);
+    // Si contextReglamentos ya tiene datos en memoria, no golpees la base de datos
+    if (!contextReglamentos || contextReglamentos.length === 0) {
+      fetchReglamentosFromDb(false);
+    }
+  }, [contextReglamentos, fetchReglamentosFromDb]);
 
   // Lista combinada (priorizando datos directos de la BD)
   const reglamentosList = useMemo(() => {
@@ -91,7 +94,7 @@ export default function ReglamentoScreen() {
         title: selectedReglamento?.titulo || 'Reglamento Oficial HOA',
         message: `Reglamento Oficial de Operación y Seguridad Las Palomas Resort (Versión ${selectedReglamento?.version || '2026.1'}). Consulta con el Comité de Seguridad HOA.`,
       });
-    } catch {}
+    } catch { }
   };
 
   const formatFecha = (fechaStr?: string | null) => {

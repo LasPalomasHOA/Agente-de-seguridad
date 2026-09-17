@@ -26,14 +26,14 @@ const customStorage = {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         window.localStorage.setItem(key, value);
       }
-    } catch {}
+    } catch { }
   },
   removeItem: async (key: string): Promise<void> => {
     try {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         window.localStorage.removeItem(key);
       }
-    } catch {}
+    } catch { }
   },
 };
 
@@ -89,18 +89,14 @@ export async function getCountOptimized(
   try {
     let query = (supabase as any)
       .from(table)
-      .select('*', { count: 'exact' })
-      .limit(0);
+      .select('*', { count: 'exact', head: true });
 
     if (filterColumn && filterValue !== undefined) {
       query = query.eq(filterColumn, filterValue);
     }
 
     const { count, error } = await query;
-    if (error) {
-      return 0;
-    }
-    return count ?? 0;
+    return error ? 0 : (count ?? 0);
   } catch {
     return 0;
   }

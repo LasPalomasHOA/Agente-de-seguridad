@@ -233,7 +233,7 @@ export default function ScannerScreen() {
         if (hrs > 0) return `${hrs}h ${mins}m`;
         return `${mins} min`;
       }
-    } catch {}
+    } catch { }
     return '';
   }, [ultimoAcceso]);
 
@@ -296,6 +296,7 @@ export default function ScannerScreen() {
   };
 
   const lookupInProgress = React.useRef(false);
+  const lastScanTimeRef = React.useRef<number>(0);
 
   const executeLookup = async (code: string) => {
     const cleanCode = (code || '').trim();
@@ -350,7 +351,13 @@ export default function ScannerScreen() {
   }, [mode]);
 
   const handleBarcodeScanned = ({ data }: { data: string; type?: string }) => {
-    if (scanned || lookupInProgress.current || !data || mode !== 'camera') return;
+    const now = Date.now();
+    // Bloquea ráfagas de frames si ocurrieron hace menos de 2500 ms o si ya hay petición activa
+    if (now - lastScanTimeRef.current < 2500 || lookupInProgress.current || !data || mode !== 'camera') {
+      return;
+    }
+
+    lastScanTimeRef.current = now;
     setScanned(true);
     executeLookup(data);
   };
@@ -573,8 +580,8 @@ export default function ScannerScreen() {
           totalDays > 0
             ? `${totalDays}d ${totalHours}h restantes`
             : totalHours > 0
-            ? `${totalHours}h ${totalMinutes}m restantes`
-            : `${totalMinutes}m restantes`;
+              ? `${totalHours}h ${totalMinutes}m restantes`
+              : `${totalMinutes}m restantes`;
 
         return {
           isBlocked: true,
@@ -1064,8 +1071,8 @@ export default function ScannerScreen() {
                           {isVehicleInside
                             ? `🟢 Acceso activo registrado a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`
                             : isAccesoToday && formatHora(ultimoAcceso?.hora_salida)
-                            ? `⚪ Última salida registrada a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
-                            : 'Sin registro de estancia activo el día de hoy.'}
+                              ? `⚪ Última salida registrada a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
+                              : 'Sin registro de estancia activo el día de hoy.'}
                         </ThemedText>
                         <ThemedText style={styles.historyRowSubtitle}>
                           {isVehicleInside

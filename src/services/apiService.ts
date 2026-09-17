@@ -106,6 +106,46 @@ export const ImageCacheStore = {
   },
 };
 
+export const EvidenciaCacheStore = {
+  getFoto(idEvidencia: number | string): string | null {
+    if (!idEvidencia) return null;
+    return safeStorage.getItem(`hoa_evidencia_${idEvidencia}`);
+  },
+  setFoto(idEvidencia: number | string, base64: string): void {
+    if (!idEvidencia || !base64 || base64.length < 50) return;
+    safeStorage.setItem(`hoa_evidencia_${idEvidencia}`, base64);
+  },
+};
+
+export async function getEvidenciaFoto(idEvidencia: number | string): Promise<string | null> {
+  const cleanId = typeof idEvidencia === 'string' ? idEvidencia.replace(/\D/g, '') : idEvidencia;
+  if (!cleanId) return null;
+
+  // 1. Verificar si ya existe en almacenamiento local (0 bytes Egress)
+  const cached = EvidenciaCacheStore.getFoto(cleanId);
+  if (cached) return cached;
+
+  // 2. Si no está en caché, consultar Supabase
+  if (isSupabaseConfigured()) {
+    try {
+      const { data, error } = await (supabase as any)
+        .from('evidencias')
+        .select('archivo')
+        .eq('id_evidencia', cleanId)
+        .single();
+
+      if (!error && data?.archivo) {
+        EvidenciaCacheStore.setFoto(cleanId, data.archivo);
+        return data.archivo;
+      }
+    } catch (err) {
+      console.warn('[ApiService] Error al obtener foto de evidencia:', err);
+    }
+  }
+
+  return null;
+}
+
 // Caché de ETags HTTP para respuestas 304 Not Modified (0 bytes de payload de red)
 const httpEtagCache = new Map<string, { etag: string; data: any }>();
 
@@ -713,18 +753,11 @@ export const ApiService = {
         if (cachedResult && cachedResult.vehiculo && Number(cachedResult.vehiculo.id_vehiculo) > 0) {
           // El vehículo y corbatín son estáticos (ahorro masivo de egress),
           // pero el último acceso vehicular y las sanciones siempre se consultan en vivo
-          const [liveAcceso, liveSanciones] = await Promise.all([
-            this.getUltimoAcceso(
-              cachedResult.vehiculo.id_vehiculo,
-              cachedResult.corbatin?.id_corbatin
-            ),
-            this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo }),
-          ]);
-          cachedResult.ultimoAcceso = liveAcceso || null;
-          if (liveSanciones) {
-            cachedResult.sancionesActivas = (liveSanciones || [])
-              .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo');
-          }
+          const liveAcceso = await this.getUltimoAcceso(
+            cachedResult.vehiculo.id_vehiculo,
+            cachedResult.corbatin?.id_corbatin
+          );
+          cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
           return cachedResult;
         }
       }
@@ -816,69 +849,57 @@ export const ApiService = {
         // Fallback controlado
       }
 
-      // 3. Fallback Seguro en Supabase (Únicamente si la API Express no estuvo disponible/alcanzable)
+
       if (!matchedCorbatin && !matchedVehiculo && !expressSucceeded) {
         if (isSupabaseConfigured()) {
           try {
-            if (numbers.length > 0 && !matchedCorbatin) {
+            // 1. Búsqueda por corbatín: Join con vehiculos y su respectiva empresa
+            if (numbers.length > 0) {
               const targetNum = numbers[0];
               const { data: directCorb, error: corbErr } = await (supabase as any)
                 .from('corbatines')
-                .select(PROJECTIONS.CORBATINES_LIGHT)
-                .eq('numero', targetNum);
+                .select(
+                  `${PROJECTIONS.CORBATINES_LIGHT}, vehiculos(${PROJECTIONS.VEHICULOS_LIGHT}, empresas(id_empresa, razon_social))`
+                )
+                .eq('numero', targetNum)
+                .limit(1);
 
               if (!corbErr && directCorb && directCorb.length > 0) {
-                const matched =
-                  directCorb.find(
-                    (c: any) =>
-                      c.id_vehiculo &&
-                      String(c.estatus || '').toLowerCase() === 'activo'
-                  ) ||
-                  directCorb.find((c: any) => c.id_vehiculo) ||
-                  directCorb[0];
+                matchedCorbatin = directCorb[0];
 
-                if (matched && Number(matched.numero) === targetNum) {
-                  matchedCorbatin = matched;
-                  if (matchedCorbatin.id_vehiculo) {
-                    const { data: directVeh, error: vehErr } = await (supabase as any)
-                      .from('vehiculos')
-                      .select(PROJECTIONS.VEHICULOS_LIGHT)
-                      .eq('id_vehiculo', matchedCorbatin.id_vehiculo)
-                      .limit(1);
-                    if (!vehErr && directVeh && directVeh.length > 0) {
-                      matchedVehiculo = directVeh[0];
-                    }
-                  }
-                }
+                // Corrección 1: Normalización defensiva (si Supabase entrega objeto único o array)
+                const vehRel = directCorb[0].vehiculos;
+                matchedVehiculo = Array.isArray(vehRel) ? (vehRel[0] || null) : (vehRel || null);
               }
             }
 
+            // 2. Búsqueda por placa: Join con empresa y sus corbatines
             if (!matchedVehiculo && plates.length > 0) {
               const validPlate = plates.find((p) => p.length >= 3) || plates[0];
               const cleanPlate = validPlate.trim().toUpperCase();
-              const cleanPlateNoHyphen = cleanPlate.replace(/[-_ ]/g, '');
-              const candidatePlates = Array.from(new Set([cleanPlate, cleanPlateNoHyphen, validPlate]));
+              const candidatePlates = Array.from(new Set([cleanPlate, cleanPlate.replace(/[-_ ]/g, ''), validPlate]));
 
               const { data: directVeh, error: vehErr } = await (supabase as any)
                 .from('vehiculos')
-                .select(PROJECTIONS.VEHICULOS_LIGHT)
+                .select(
+                  `${PROJECTIONS.VEHICULOS_LIGHT}, empresas(id_empresa, razon_social), corbatines(${PROJECTIONS.CORBATINES_LIGHT})`
+                )
                 .in('placas', candidatePlates)
                 .limit(1);
 
               if (!vehErr && directVeh && directVeh.length > 0) {
                 matchedVehiculo = directVeh[0];
-                const { data: directCorb, error: corbErr } = await (supabase as any)
-                  .from('corbatines')
-                  .select(PROJECTIONS.CORBATINES_LIGHT)
-                  .eq('id_vehiculo', matchedVehiculo.id_vehiculo)
-                  .eq('estatus', 'activo')
-                  .limit(1);
-                if (!corbErr && directCorb && directCorb.length > 0) {
-                  matchedCorbatin = directCorb[0];
-                }
+
+                // Corrección 2: Priorizar el corbatín ACTIVO si el vehículo tiene historial
+                const corbs = directVeh[0].corbatines;
+                matchedCorbatin = Array.isArray(corbs)
+                  ? (corbs.find((c: any) => String(c.estatus || '').toLowerCase() === 'activo') || corbs[0] || null)
+                  : (corbs || null);
               }
             }
-          } catch { }
+          } catch (err) {
+            console.warn('[ApiService] Error en consulta unificada Supabase:', err);
+          }
         }
       }
 
@@ -1080,13 +1101,15 @@ export const ApiService = {
           const data = await fetchJson('/reglamentos');
           if (Array.isArray(data)) {
             return data.map((reg: any) => ({
-              id_reglamento: reg.id_reglamento,
+              id_reglamento: Number(reg.id_reglamento) || 1,
               version: reg.version || '2026.1',
-              titulo: reg.titulo || 'Reglamento General',
+              titulo: reg.titulo || 'Reglamento General de Acceso y Operación',
               archivo_url: reg.archivo_url || '',
               fecha_publicacion: reg.fecha_publicacion || new Date().toISOString(),
-              vigente: reg.vigente ?? true,
+              vigente: reg.vigente !== false,
               created_at: reg.created_at || new Date().toISOString(),
+              infracciones: Array.isArray(reg.infracciones) ? reg.infracciones : [],
+              aceptaciones: Array.isArray(reg.aceptaciones) ? reg.aceptaciones : [],
             }));
           }
         } catch {
@@ -1194,7 +1217,7 @@ export const ApiService = {
         if (res && res.id_reporte) {
           resReporteId = res.id_reporte;
         }
-      } catch {}
+      } catch { }
 
       // Fallback Supabase si no hubo respuesta del servidor Express
       if (!resReporteId && isSupabaseConfigured()) {
@@ -1230,24 +1253,26 @@ export const ApiService = {
                 id_usuario: params.idUsuario,
               });
           }
-        } catch {}
+        } catch { }
       }
 
-      // Invalidación selectiva y granular: preserva las consultas de otros vehículos en caché
-      apiCache.invalidate('reportes_list');
-      apiCache.invalidate('reportes_count_all');
+      // Invalidación selectiva y granular: preserva las consultas de otros usuarios y vehículos
+      if (params.idUsuario) {
+        // Invalida cualquier lista o conteo de este oficial (sin importar el limit o vehículo)
+        apiCache.invalidate(`reportes_list_${params.idUsuario}`);
+        apiCache.invalidate(`reportes_count_all_${params.idUsuario}`);
+      }
 
       if (params.idVehiculo) {
+        // Invalida búsquedas, conteos y sanciones específicas de este vehículo
         apiCache.invalidate(`lookup_veh_${params.idVehiculo}`);
         apiCache.invalidate(`reportes_count_${params.idVehiculo}`);
         apiCache.invalidate(`sanciones_list_${params.idVehiculo}`);
+        apiCache.invalidate(`reportes_list_all_${params.idVehiculo}`);
       }
+
       if (params.idCorbatin) {
         apiCache.invalidate(`lookup_num_${params.idCorbatin}`);
-      }
-      if (params.idUsuario) {
-        apiCache.invalidate(`reportes_list_${params.idUsuario}`);
-        apiCache.invalidate(`reportes_count_all_${params.idUsuario}`);
       }
 
       if (resReporteId) {
@@ -1289,8 +1314,8 @@ export const ApiService = {
         const count = idVehiculo
           ? res.filter((r: any) => Number(r.id_vehiculo) === Number(idVehiculo)).length
           : idUsuario
-          ? res.filter((r: any) => Number(r.id_usuario) === Number(idUsuario)).length
-          : res.length;
+            ? res.filter((r: any) => Number(r.id_usuario) === Number(idUsuario)).length
+            : res.length;
         apiCache.set(cacheKey, count);
         return count;
       }
@@ -1312,6 +1337,9 @@ export const ApiService = {
     return 0;
   },
 
+  /**
+   * Obtiene la lista de reportes con soporte para límites y filtrado estricto por oficial
+   */
   /**
    * Obtiene la lista de reportes con soporte para límites y filtrado estricto por oficial
    */
@@ -1364,7 +1392,7 @@ export const ApiService = {
             let query = (supabase as any)
               .from('reportes_infracciones')
               .select(
-                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, evidencias(id_evidencia, archivo, descripcion, fecha_captura)'
+                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, evidencias(id_evidencia, descripcion, fecha_captura)'
               )
               .order('id_reporte', { ascending: false })
               .limit(queryLimit);
@@ -1393,7 +1421,7 @@ export const ApiService = {
     if (!vId && !cId) return null;
 
     const cacheKey = vId ? `ultimo_acceso_veh_${vId}` : `ultimo_acceso_corb_${cId}`;
-    const cached = apiCache.get<BitacoraAccesoRow>(cacheKey, 3 * 1000);
+    const cached = apiCache.get<BitacoraAccesoRow>(cacheKey, 45 * 1000);
     if (cached !== null && cached !== undefined) {
       if ((vId && Number(cached.id_vehiculo) === vId) || (cId && Number(cached.id_corbatin) === cId)) {
         return cached;
@@ -1412,7 +1440,7 @@ export const ApiService = {
           localAcceso = entry;
         }
       }
-    } catch {}
+    } catch { }
 
     // 2. Consultar servidor Express
     try {
@@ -1445,7 +1473,7 @@ export const ApiService = {
         apiCache.set(cacheKey, mapped);
         return mapped;
       }
-    } catch {}
+    } catch { }
 
     // 3. Supabase Fallback
     if (isSupabaseConfigured()) {
@@ -1491,7 +1519,7 @@ export const ApiService = {
             return mapped;
           }
         }
-      } catch {}
+      } catch { }
     }
 
     // 4. Si el backend no devolvió filas pero hay registro local
@@ -1545,7 +1573,7 @@ export const ApiService = {
       }
       map[String(params.idVehiculo)] = newAcceso;
       safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
-    } catch {}
+    } catch { }
 
     // Invalidar únicamente la caché del último acceso de este vehículo (preserva catálogos de vehículos en RAM)
     apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
@@ -1586,7 +1614,7 @@ export const ApiService = {
           const map = JSON.parse(safeStorage.getItem('hoa_local_bitacora_map') || '{}');
           map[String(params.idVehiculo)] = newAcceso;
           safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
-        } catch {}
+        } catch { }
       }
     } catch {
       // 3. Fallback a Supabase
@@ -1615,9 +1643,9 @@ export const ApiService = {
               const map = JSON.parse(safeStorage.getItem('hoa_local_bitacora_map') || '{}');
               map[String(params.idVehiculo)] = newAcceso;
               safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
-            } catch {}
+            } catch { }
           }
-        } catch {}
+        } catch { }
       }
     }
 
@@ -1667,7 +1695,7 @@ export const ApiService = {
       };
       map[String(params.idVehiculo)] = updatedAcceso;
       safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
-    } catch {}
+    } catch { }
 
     // Invalidar únicamente la clave de último acceso (sin purgar lookup_ global)
     apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
@@ -1700,7 +1728,7 @@ export const ApiService = {
           observaciones: params.observaciones || 'Salida registrada en caseta.',
         }),
       });
-    } catch {}
+    } catch { }
 
     // 3. Fallback en Supabase (un solo salto de red sin SELECTs previos)
     if (isSupabaseConfigured()) {
@@ -1726,7 +1754,7 @@ export const ApiService = {
             .eq('id_vehiculo', params.idVehiculo)
             .is('hora_salida', null);
         }
-      } catch {}
+      } catch { }
     }
 
     return { success: true, horaSalida: utcIsoStr };

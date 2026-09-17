@@ -82,21 +82,27 @@ export default function HomeDashboard() {
     return () => clearInterval(timer);
   }, []);
 
+  // En app/index.tsx (alrededor de la línea ~70)
+
   const misReportes = useMemo(
-    () => reportes.filter((r) => r.agenteId === agenteActual.id),
+    () => (reportes || []).filter((r) => r.agenteId === agenteActual.id || (r as any).id_usuario === Number(agenteActual.id)),
     [reportes, agenteActual.id]
   );
+
   const todayIso = useMemo(() => new Date().toISOString().split('T')[0], []);
+
   const reportesHoyCount = useMemo(
-    () => misReportes.filter((r) => (r.fecha || '').startsWith(todayIso)).length,
+    () => misReportes.filter((r) => (r.fecha || (r as any).created_at || '').startsWith(todayIso)).length,
     [misReportes, todayIso]
   );
+
   const pendientesCount = useMemo(
-    () => misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'borrador').length,
+    () => misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'borrador' || (r as any).estatus_revision === 'pendiente').length,
     [misReportes]
   );
+
   const aprobadosCount = useMemo(
-    () => misReportes.filter((r) => r.estado === 'aprobado').length,
+    () => misReportes.filter((r) => r.estado === 'aprobado' || (r as any).estatus_revision === 'aprobada').length,
     [misReportes]
   );
 
