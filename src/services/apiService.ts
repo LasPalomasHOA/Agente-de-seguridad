@@ -145,7 +145,33 @@ export async function getEvidenciaFoto(idEvidencia: number | string): Promise<st
 
   return null;
 }
+export async function getVehiculoFoto(idVehiculo: number | string): Promise<string | null> {
+  if (!idVehiculo) return null;
 
+  // 1. Revisar caché local (0 bytes Egress)
+  const cached = ImageCacheStore.getVehiclePhoto(idVehiculo);
+  if (cached) return cached;
+
+  // 2. Si no está en caché, pedir solo la columna foto_url de ese vehículo puntual
+  if (isSupabaseConfigured()) {
+    try {
+      const { data, error } = await (supabase as any)
+        .from('vehiculos')
+        .select('foto_url')
+        .eq('id_vehiculo', idVehiculo)
+        .single();
+
+      if (!error && data?.foto_url) {
+        ImageCacheStore.setVehiclePhoto(idVehiculo, data.foto_url);
+        return data.foto_url;
+      }
+    } catch (err) {
+      console.warn('[ApiService] Error al obtener foto de vehículo:', err);
+    }
+  }
+
+  return null;
+}
 // Caché de ETags HTTP para respuestas 304 Not Modified (0 bytes de payload de red)
 const httpEtagCache = new Map<string, { etag: string; data: any }>();
 
@@ -1816,24 +1842,32 @@ export const ApiService = {
       try {
         const data = await fetchJson('/vehiculos?limit=50');
         if (Array.isArray(data)) {
-          data.forEach((v: any) => {
+          return data.map((v: any) => {
+            // Guardar en caché local si Express envió foto y no saturar memoria activa
             const f = v.foto_url || v.foto;
             if (f && f.length > 50 && v.id_vehiculo) {
               ImageCacheStore.setVehiclePhoto(v.id_vehiculo, f);
             }
+            return {
+              ...v,
+              // Omitir el Base64 del objeto en memoria para la lista general
+              foto_url: ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
+            };
           });
-          return data;
         }
       } catch {
         if (isSupabaseConfigured()) {
+          // PROJECTIONS.VEHICULOS_LIGHT ya no debe incluir foto_url
           const { data } = await supabase
             .from('vehiculos')
             .select(PROJECTIONS.VEHICULOS_LIGHT)
             .limit(50);
+
           if (data && Array.isArray(data)) {
             return data.map((v: any) => ({
               ...v,
-              foto_url: ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || v.foto_url,
+              // Asignar desde caché local si existe, o null
+              foto_url: ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
             })) as VehiculoRow[];
           }
         }

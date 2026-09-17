@@ -309,6 +309,14 @@ export default function ScannerScreen() {
     try {
       const res = await SupabaseService.buscarCorbatin(cleanCode);
       if (res && res.vehiculo) {
+        // Si el vehículo no trae foto en memoria, pedirla de forma puntual y cacheada
+        if (!res.vehiculo.foto_url && res.vehiculo.id_vehiculo) {
+          const foto = await SupabaseService.getVehiculoFoto(res.vehiculo.id_vehiculo);
+          if (foto) {
+            res.vehiculo.foto_url = foto;
+          }
+        }
+
         setSelectedVehicle(res.vehiculo);
         setSelectedCorbatin(res.corbatin);
         setSelectedEmpresa(res.empresa);
