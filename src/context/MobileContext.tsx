@@ -63,7 +63,7 @@ const getAvatarUrl = (nombre?: string, avatar?: string | null): string => {
   if (avatar && typeof avatar === 'string' && avatar.trim().length > 0) {
     return avatar.trim();
   }
-  return 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=200';
+  return '';
 };
 
 const DEFAULT_AGENTE: Agente = {
@@ -348,6 +348,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         idUsuario: Number(usrIdNum) || 1,
         ubicacionTexto: nuevo.lugar,
         descripcionHechos: nuevo.descripcion,
+        evidencias: nuevo.evidencias,
         evidenciasUrls: nuevo.evidencias.map((e) => e.fotoUrl),
       });
 

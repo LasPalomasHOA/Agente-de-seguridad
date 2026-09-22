@@ -14,6 +14,7 @@ import {
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { supabase, isSupabaseConfigured, PROJECTIONS, getCountOptimized } from '../lib/supabase';
+import { uploadEvidenciaASupabase, comprimirImagen } from './imageService';
 
 const resolveApiBaseUrl = (): string => {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
@@ -111,9 +112,9 @@ export const EvidenciaCacheStore = {
     if (!idEvidencia) return null;
     return safeStorage.getItem(`hoa_evidencia_${idEvidencia}`);
   },
-  setFoto(idEvidencia: number | string, base64: string): void {
-    if (!idEvidencia || !base64 || base64.length < 50) return;
-    safeStorage.setItem(`hoa_evidencia_${idEvidencia}`, base64);
+  setFoto(idEvidencia: number | string, urlOrBase64: string): void {
+    if (!idEvidencia || !urlOrBase64 || urlOrBase64.length < 5) return;
+    safeStorage.setItem(`hoa_evidencia_${idEvidencia}`, urlOrBase64);
   },
 };
 
@@ -466,7 +467,7 @@ export const ApiService = {
             userData.avatar ||
             userData.foto ||
             userData.imagen ||
-            'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=150';
+            null;
           return {
             id_usuario: id,
             nombre: userData.nombre,
@@ -978,9 +979,7 @@ export const ApiService = {
         año: matchedVehiculo?.año || matchedVehiculo?.anio || 2024,
         placas: matchedVehiculo?.placas || matchedVehiculo?.placa || 'SIN-PLACA',
         color: matchedVehiculo?.color || 'Blanco',
-        foto_url:
-          finalFotoUrl ||
-          'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
+        foto_url: finalFotoUrl || null,
         estatus_acceso: matchedVehiculo?.estatus_acceso || 'HABILITADO',
         created_at: matchedVehiculo?.created_at || new Date().toISOString(),
         updated_at: matchedVehiculo?.updated_at || new Date().toISOString(),
@@ -1209,7 +1208,7 @@ export const ApiService = {
   },
 
   /**
-   * Registra un nuevo reporte de infracción e invalida selectivamente las cachés afectadas
+   * Registra un nuevo reporte de infracción, sube evidencias comprimidas a Supabase Storage e invalida selectivamente cachés
    */
   async crearReporteInfraccion(params: {
     idVehiculo: number;
@@ -1219,6 +1218,7 @@ export const ApiService = {
     ubicacionTexto?: string;
     descripcionHechos: string;
     evidenciasUrls?: string[];
+    evidencias?: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }>;
   }): Promise<{ idReporte: number } | null> {
     try {
       const now = new Date();
@@ -1236,6 +1236,38 @@ export const ApiService = {
         fechaFinStr = null; // 4ª Falta: Permanente
       }
 
+      // 1. Procesar y subir evidencias a Supabase Storage (comprimidas a WebP)
+      const processedEvidencias: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }> = [];
+      const rawList = params.evidencias || (params.evidenciasUrls || []).map((url) => ({ fotoUrl: url }));
+
+      for (let i = 0; i < rawList.length; i++) {
+        const item = rawList[i];
+        if (!item.fotoUrl) continue;
+
+        try {
+          if (item.fotoUrl.startsWith('http://') || item.fotoUrl.startsWith('https://')) {
+            // Ya es una URL remota
+            processedEvidencias.push(item);
+          } else {
+            // Es base64 o archivo local: comprimir y subir a Supabase Storage
+            const uploadRes = await uploadEvidenciaASupabase(item.fotoUrl, {
+              idUsuario: params.idUsuario,
+              fileName: `ev_${Date.now()}_${i + 1}.webp`,
+            });
+            if (uploadRes?.publicUrl) {
+              processedEvidencias.push({
+                ...item,
+                fotoUrl: uploadRes.publicUrl,
+              });
+            }
+          }
+        } catch (uploadErr) {
+          console.warn('[ApiService] Error subiendo evidencia a Storage:', uploadErr);
+          processedEvidencias.push(item);
+        }
+      }
+
+      const finalUrls = processedEvidencias.map((e) => e.fotoUrl);
       let resReporteId: number | null = null;
 
       try {
@@ -1248,7 +1280,7 @@ export const ApiService = {
             id_usuario: params.idUsuario,
             ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
             descripcion_hechos: params.descripcionHechos,
-            evidencia_url: params.evidenciasUrls?.[0] || null,
+            evidencia_url: finalUrls[0] || null,
             numero_reincidencia: nuevoNivel,
             fecha_fin: fechaFinStr,
           }),
@@ -1258,41 +1290,67 @@ export const ApiService = {
         }
       } catch { }
 
-      // Fallback Supabase si no hubo respuesta del servidor Express
-      if (!resReporteId && isSupabaseConfigured()) {
+      // Fallback Supabase si no hubo respuesta del servidor Express o para persistir evidencias en tabla
+      if (isSupabaseConfigured()) {
         try {
-          const { data: repData } = await (supabase as any)
-            .from('reportes_infracciones')
-            .insert({
-              id_vehiculo: params.idVehiculo,
-              id_corbatin: params.idCorbatin || null,
-              id_infraccion: params.idInfraccion,
-              id_usuario: params.idUsuario,
-              ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
-              descripcion_hechos: params.descripcionHechos,
-              estatus_revision: 'aprobada',
-            })
-            .select('id_reporte')
-            .single();
-
-          if (repData && repData.id_reporte) {
-            resReporteId = repData.id_reporte;
-            await (supabase as any)
-              .from('sanciones')
+          if (!resReporteId) {
+            const { data: repData } = await (supabase as any)
+              .from('reportes_infracciones')
               .insert({
-                id_reporte: repData.id_reporte,
                 id_vehiculo: params.idVehiculo,
-                id_empresa: 1,
-                id_regla: nuevoNivel <= 4 ? nuevoNivel : 4,
-                numero_reincidencia: nuevoNivel,
-                fecha_inicio: now.toISOString(),
-                fecha_fin: fechaFinStr,
-                estatus: 'activa',
-                motivo: params.descripcionHechos || 'Infracción reglamentaria',
+                id_corbatin: params.idCorbatin || null,
+                id_infraccion: params.idInfraccion,
                 id_usuario: params.idUsuario,
-              });
+                ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
+                descripcion_hechos: params.descripcionHechos,
+                estatus_revision: 'aprobada',
+              })
+              .select('id_reporte')
+              .single();
+
+            if (repData && repData.id_reporte) {
+              resReporteId = repData.id_reporte;
+              await (supabase as any)
+                .from('sanciones')
+                .insert({
+                  id_reporte: repData.id_reporte,
+                  id_vehiculo: params.idVehiculo,
+                  id_empresa: 1,
+                  id_regla: nuevoNivel <= 4 ? nuevoNivel : 4,
+                  numero_reincidencia: nuevoNivel,
+                  fecha_inicio: now.toISOString(),
+                  fecha_fin: fechaFinStr,
+                  estatus: 'activa',
+                  motivo: params.descripcionHechos || 'Infracción reglamentaria',
+                  id_usuario: params.idUsuario,
+                });
+            }
           }
-        } catch { }
+
+          // Guardar cada evidencia en la tabla evidencias vinculada al reporte
+          if (resReporteId && processedEvidencias.length > 0) {
+            for (const ev of processedEvidencias) {
+              const { data: evData } = await (supabase as any)
+                .from('evidencias')
+                .insert({
+                  id_reporte: resReporteId,
+                  archivo: ev.fotoUrl,
+                  descripcion: ev.descripcion || 'Fotografía de evidencia levantada por oficial.',
+                  fecha_captura: ev.fechaHora || now.toISOString(),
+                  id_usuario: params.idUsuario,
+                  activa: true,
+                })
+                .select('id_evidencia')
+                .single();
+
+              if (evData?.id_evidencia) {
+                EvidenciaCacheStore.setFoto(evData.id_evidencia, ev.fotoUrl);
+              }
+            }
+          }
+        } catch (supabaseInsertErr) {
+          console.warn('[ApiService] Error al insertar reporte/evidencias en Supabase:', supabaseInsertErr);
+        }
       }
 
       // Invalidación selectiva y granular
@@ -1433,7 +1491,7 @@ export const ApiService = {
             let query = (supabase as any)
               .from('reportes_infracciones')
               .select(
-                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, evidencias(id_evidencia, descripcion, fecha_captura)'
+                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, evidencias(id_evidencia, archivo, descripcion, fecha_captura)'
               )
               .order('id_reporte', { ascending: false })
               .limit(queryLimit);
@@ -1443,6 +1501,16 @@ export const ApiService = {
 
             const { data } = await query;
             if (data && Array.isArray(data)) {
+              // Cachear en EvidenciaCacheStore cada URL de evidencia recuperada (0 bytes Egress en futuras consultas)
+              data.forEach((r: any) => {
+                if (r.evidencias && Array.isArray(r.evidencias)) {
+                  r.evidencias.forEach((ev: any) => {
+                    if (ev.id_evidencia && ev.archivo) {
+                      EvidenciaCacheStore.setFoto(ev.id_evidencia, ev.archivo);
+                    }
+                  });
+                }
+              });
               return data;
             }
           }

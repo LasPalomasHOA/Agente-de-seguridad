@@ -25,6 +25,7 @@ import { Select } from '../components/ui/select';
 import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
 import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow, BitacoraAccesoRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
+import { comprimirImagen } from '../services/imageService';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 
 type Mode = 'camera' | 'loading' | 'result' | 'wizard' | 'confirmation';
@@ -32,13 +33,6 @@ type WizardStep = 1 | 2 | 3;
 
 const { width } = Dimensions.get('window');
 
-const SAMPLE_EVIDENCIA_PHOTOS = [
-  'https://images.unsplash.com/photo-1508962914676-134849a727f0?auto=format&fit=crop&q=80&w=600',
-  'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&q=80&w=600',
-  'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&q=80&w=600',
-  'https://images.unsplash.com/photo-1581094288338-2314dddb7ecc?auto=format&fit=crop&q=80&w=600',
-  'https://images.unsplash.com/photo-1590674899484-d5640e854abe?auto=format&fit=crop&q=80&w=600',
-];
 
 const INFRACTION_CATEGORIES = [
   { id: 'estacionamiento', name: 'Estacionamiento', icon: 'car-outline', defaultCode: 'INF-04' },
@@ -419,18 +413,38 @@ export default function ScannerScreen() {
     setMode('wizard');
   };
 
-  const handleAddPhotoSimulate = () => {
+  const handleAddPhoto = async () => {
     if (evidencias.length >= 5) return;
-    const nextPhotoUrl = SAMPLE_EVIDENCIA_PHOTOS[photoCount % SAMPLE_EVIDENCIA_PHOTOS.length];
-    const newEvidencia: Evidencia = {
-      id: `ev_${Date.now()}`,
-      fotoUrl: nextPhotoUrl,
-      fechaHora: new Date().toISOString(),
-      isPrincipal: evidencias.length === 0,
-      descripcion: 'Fotografía de evidencia levantada por oficial.',
-    };
-    setEvidencias([...evidencias, newEvidencia]);
-    setPhotoCount(photoCount + 1);
+
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = async (e: any) => {
+        const file = e.target?.files?.[0];
+        if (file) {
+          try {
+            const comp = await comprimirImagen(file, 800, 0.65);
+            const newEvidencia: Evidencia = {
+              id: `ev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              fotoUrl: comp.base64 || comp.uri,
+              fechaHora: new Date().toISOString(),
+              isPrincipal: evidencias.length === 0,
+              descripcion: `Fotografía de evidencia levantada por oficial (${comp.sizeKB} KB).`,
+            };
+            setEvidencias((prev) => [...prev, newEvidencia]);
+            setPhotoCount((prev) => prev + 1);
+          } catch (err) {
+            console.warn('[Scanner] Error comprimiendo foto seleccionada:', err);
+          }
+        }
+      };
+      input.click();
+      return;
+    }
+
+    // Dispositivo móvil: si no se selecciona archivo, omitir
+    alert('Por favor selecciona una fotografía desde tu dispositivo.');
   };
 
   const handleDeletePhoto = (id: string) => {
@@ -811,12 +825,19 @@ export default function ScannerScreen() {
               {/* Suspended Vehicle Card with Photo on Left */}
               <View style={styles.suspendedVehicleCard}>
                 <View style={styles.suspendedPhotoCol}>
-                  <Image
-                    source={{ uri: selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[1] }}
-                    style={styles.suspendedPhotoImg}
-                    contentFit="cover"
-                    cachePolicy="memory-disk"
-                  />
+                  {selectedVehicle.foto_url ? (
+                    <Image
+                      source={{ uri: selectedVehicle.foto_url }}
+                      style={styles.suspendedPhotoImg}
+                      contentFit="cover"
+                      cachePolicy="memory-disk"
+                    />
+                  ) : (
+                    <View style={[styles.suspendedPhotoImg, { backgroundColor: '#F1F5F9', alignItems: 'center', justifyContent: 'center' }]}>
+                      <Ionicons name="car-outline" size={32} color="#94A3B8" />
+                      <ThemedText style={{ fontSize: 10, color: '#94A3B8', marginTop: 2, fontWeight: '600' }}>Sin foto</ThemedText>
+                    </View>
+                  )}
                   <View style={styles.plateTagOverlay}>
                     <ThemedText style={styles.plateTagOverlayText}>{selectedVehicle.placas}</ThemedText>
                   </View>
@@ -1074,24 +1095,33 @@ export default function ScannerScreen() {
 
                 {/* Right Column: Foto, Botón de Salida/Entrada, Botón de Infracción & Enlace */}
                 <View style={styles.identifiedRightCol}>
-                  <Pressable
-                    onPress={() => setLightboxPhoto(selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[0])}
-                    style={({ pressed }) => [
-                      styles.photoReferenceCard,
-                      pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-                    ]}
-                  >
-                    <Image
-                      source={{ uri: selectedVehicle.foto_url || SAMPLE_EVIDENCIA_PHOTOS[0] }}
-                      style={styles.referencePhotoImg}
-                      contentFit="cover"
-                      cachePolicy="memory-disk"
-                    />
-                    <View style={styles.photoReferenceFooter}>
-                      <ThemedText style={styles.photoReferenceLabel}>Foto de Referencia &bull; Tocar para Zoom</ThemedText>
-                      <Ionicons name="search" size={14} color="#0D6E5F" />
+                  {selectedVehicle.foto_url ? (
+                    <Pressable
+                      onPress={() => setLightboxPhoto(selectedVehicle.foto_url || null)}
+                      style={({ pressed }) => [
+                        styles.photoReferenceCard,
+                        pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                      ]}
+                    >
+                      <Image
+                        source={{ uri: selectedVehicle.foto_url }}
+                        style={styles.referencePhotoImg}
+                        contentFit="cover"
+                        cachePolicy="memory-disk"
+                      />
+                      <View style={styles.photoReferenceFooter}>
+                        <ThemedText style={styles.photoReferenceLabel}>Foto de Referencia &bull; Tocar para Zoom</ThemedText>
+                        <Ionicons name="search" size={14} color="#0D6E5F" />
+                      </View>
+                    </Pressable>
+                  ) : (
+                    <View style={[styles.photoReferenceCard, { alignItems: 'center', justifyContent: 'center', paddingVertical: 22, backgroundColor: '#F8FAFC' }]}>
+                      <Ionicons name="car-outline" size={40} color="#CBD5E1" />
+                      <ThemedText style={{ fontSize: 11, color: '#94A3B8', marginTop: 6, fontWeight: '600' }}>
+                        Sin fotografía registrada
+                      </ThemedText>
                     </View>
-                  </Pressable>
+                  )}
 
                   {/* ─── BOTÓN PRINCIPAL DE CONTROL DE ACCESO (SALIDA / ENTRADA) ─── */}
                   {isVehicleInside ? (
@@ -1341,7 +1371,7 @@ export default function ScannerScreen() {
 
           {/* Camera Take Button Card */}
           <Pressable
-            onPress={handleAddPhotoSimulate}
+            onPress={handleAddPhoto}
             disabled={evidencias.length >= 5}
             style={({ pressed }) => [
               styles.dashedPhotoBox,
