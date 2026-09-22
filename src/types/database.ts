@@ -254,6 +254,11 @@ export interface BitacoraAccesoRow {
 }
 
 // 10. REGLAMENTOS
+export interface ReglamentoSeccion {
+  title: string;
+  items: string[];
+}
+
 export interface ReglamentoRow {
   id_reglamento: number;
   version: string;
@@ -262,6 +267,10 @@ export interface ReglamentoRow {
   fecha_publicacion: string;
   vigente: boolean;
   created_at: string;
+  contenido_texto?: string;
+  contenido_secciones?: ReglamentoSeccion[];
+  infracciones?: CatalogoInfraccionRow[];
+  aceptaciones?: AceptacionReglamentoRow[];
 }
 
 // 11. ACEPTACIONES_REGLAMENTO

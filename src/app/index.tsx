@@ -421,13 +421,14 @@ export default function HomeDashboard() {
 
 const styles = StyleSheet.create({
   scrollContainer: {
-    padding: 18,
-    paddingBottom: 70,
-    gap: 16,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 80,
+    gap: 14,
   },
   heroBannerContainer: {
     position: 'relative',
-    height: 78,
+    height: 84,
     borderRadius: 16,
     overflow: 'hidden',
     shadowColor: '#000',

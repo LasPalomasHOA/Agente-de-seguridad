@@ -1157,29 +1157,38 @@ export const ApiService = {
       async () => {
         try {
           const data = await fetchJson('/reglamentos');
-          if (Array.isArray(data)) {
+          if (Array.isArray(data) && data.length > 0) {
             return data.map((reg: any) => ({
               id_reglamento: Number(reg.id_reglamento) || 1,
-              version: reg.version || '2026.1',
-              titulo: reg.titulo || 'Reglamento General de Acceso y Operación',
+              version: reg.version || 'V2026-1',
+              titulo: reg.titulo || 'Reglamento General de Acceso, Tránsito y Operación',
               archivo_url: reg.archivo_url || '',
               fecha_publicacion: reg.fecha_publicacion || new Date().toISOString(),
               vigente: reg.vigente !== false,
               created_at: reg.created_at || new Date().toISOString(),
+              contenido_texto: reg.contenido_texto || '',
+              contenido_secciones: Array.isArray(reg.contenido_secciones) ? reg.contenido_secciones : [],
               infracciones: Array.isArray(reg.infracciones) ? reg.infracciones : [],
               aceptaciones: Array.isArray(reg.aceptaciones) ? reg.aceptaciones : [],
             }));
           }
-        } catch {
-          if (isSupabaseConfigured()) {
+        } catch (e) {
+          console.warn('[ApiService] Error al consultar /reglamentos vía API:', e);
+        }
+
+        // Fallback a Supabase directo si aplica
+        if (isSupabaseConfigured()) {
+          try {
             const { data } = await supabase
               .from('reglamentos')
               .select(PROJECTIONS.REGLAMENTOS)
               .order('vigente', { ascending: false })
               .limit(50);
-            if (data && Array.isArray(data)) {
+            if (data && Array.isArray(data) && data.length > 0) {
               return data as ReglamentoRow[];
             }
+          } catch (supErr) {
+            console.warn('[ApiService] Fallback Supabase reglamentos:', supErr);
           }
         }
         return [];

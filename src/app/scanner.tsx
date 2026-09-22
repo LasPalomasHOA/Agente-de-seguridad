@@ -42,6 +42,7 @@ const INFRACTION_CATEGORIES = [
   { id: 'velocidad', name: 'Exceso Velocidad', icon: 'speedometer-outline', defaultCode: 'INF-01' },
   { id: 'corbatin', name: 'Sin Corbatín QR', icon: 'qr-code-outline', defaultCode: 'INF-05' },
   { id: 'escombros', name: 'Escombros/Basura', icon: 'trash-outline', defaultCode: 'INF-06' },
+  { id: 'otros', name: 'Otros', icon: 'create-outline', defaultCode: 'INF-07' },
 ];
 
 const formatHora = (timeStr?: string | null): string | null => {
@@ -158,6 +159,7 @@ export default function ScannerScreen() {
   const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
   const [hora, setHora] = useState(new Date().toTimeString().split(' ')[0].substring(0, 5));
   const [descripcion, setDescripcion] = useState('');
+  const [otraInfraccionTexto, setOtraInfraccionTexto] = useState('');
 
   // Step 2: Photos
   const [evidencias, setEvidencias] = useState<Evidencia[]>([]);
@@ -398,6 +400,7 @@ export default function ScannerScreen() {
   const startReportWizard = () => {
     setStep(1);
     setSelectedCategory('estacionamiento');
+    setOtraInfraccionTexto('');
     const defaultInf = catalogoInfracciones.find((i) => i.codigo === 'INF-04') || catalogoInfracciones[0] || {
       id_infraccion: 1,
       id_reglamento: 1,
@@ -527,6 +530,10 @@ export default function ScannerScreen() {
     setSubmitting(true);
 
     try {
+      const finalDesc = (selectedCategory === 'otros' || selectedCategory === 'otro') && otraInfraccionTexto.trim()
+        ? `[${otraInfraccionTexto.trim()}] ${descripcion}`.trim()
+        : (descripcion || 'Infracción reportada durante inspección de seguridad.');
+
       const folio = await agregarReporte(
         {
           vehiculoId: String(selectedVehicle.id_vehiculo),
@@ -534,9 +541,9 @@ export default function ScannerScreen() {
           infraccionCodigo: selectedInfraccion.codigo,
           idVehiculo: Number(selectedVehicle.id_vehiculo),
           idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
-          idInfraccion: Number(selectedInfraccion.id_infraccion) || 1,
+          idInfraccion: selectedInfraccion.id_infraccion ? Number(selectedInfraccion.id_infraccion) : 7,
           lugar: lugar,
-          descripcion: descripcion || 'Infracción reportada durante inspección de seguridad.',
+          descripcion: finalDesc,
           observaciones: 'Evidencias registradas desde el dispositivo de oficial.',
           evidencias: evidencias,
         },
@@ -1299,11 +1306,12 @@ export default function ScannerScreen() {
               </ThemedText>
             </View>
 
-            {/* Catálogo de Infracciones Grid (2x3) */}
+            {/* Catálogo de Infracciones Grid */}
             <ThemedText style={styles.sectionFormTitle}>Catálogo de Infracciones</ThemedText>
             <View style={styles.catGrid}>
               {INFRACTION_CATEGORIES.map((cat) => {
                 const isSelected = selectedCategory === cat.id;
+                const isOtro = cat.id === 'otros' || cat.id === 'otro';
                 return (
                   <Pressable
                     key={cat.id}
@@ -1312,9 +1320,10 @@ export default function ScannerScreen() {
                       const matched =
                         catalogoInfracciones.find((i) => (i.codigo || '').toLowerCase() === cat.defaultCode.toLowerCase()) ||
                         catalogoInfracciones.find((i) => (i.categoria || '').toLowerCase().includes(cat.id)) ||
+                        catalogoInfracciones.find((i) => (i.nombre || '').toLowerCase().includes(cat.name.toLowerCase())) ||
                         catalogoInfracciones[0] ||
                         {
-                          id_infraccion: 1,
+                          id_infraccion: cat.defaultCode === 'INF-07' ? 7 : 1,
                           id_reglamento: 1,
                           codigo: cat.defaultCode,
                           nombre: cat.name,
@@ -1326,12 +1335,13 @@ export default function ScannerScreen() {
                     }}
                     style={[
                       styles.catCard,
+                      isOtro && styles.catCardOtro,
                       isSelected && styles.catCardSelected,
                     ]}
                   >
                     <Ionicons
                       name={cat.icon as any}
-                      size={24}
+                      size={isOtro ? 22 : 24}
                       color={isSelected ? '#DC2626' : '#64748B'}
                     />
                     <ThemedText style={[styles.catCardText, isSelected && styles.catCardTextSelected]}>
@@ -1346,6 +1356,26 @@ export default function ScannerScreen() {
                 );
               })}
             </View>
+
+            {/* Campo Específico cuando se selecciona 'Otros' */}
+            {(selectedCategory === 'otros' || selectedCategory === 'otro') && (
+              <View style={styles.otherCategoryCard}>
+                <View style={styles.otherCategoryHeader}>
+                  <Ionicons name="create-outline" size={18} color="#DC2626" />
+                  <ThemedText style={styles.otherCategoryTitle}>
+                    Especifique el Motivo / Falta (Opcional)
+                  </ThemedText>
+                </View>
+                <TextInput
+                  placeholder="Ej: Obstrucción de hidrante, música alta, desorden..."
+                  placeholderTextColor="#94a3b8"
+                  value={otraInfraccionTexto}
+                  onChangeText={setOtraInfraccionTexto}
+                  style={styles.otherCategoryInput}
+                  autoFocus
+                />
+              </View>
+            )}
 
             {/* Detalles del Incidente Form */}
             <ThemedText style={styles.sectionFormTitle}>Detalles del Incidente</ThemedText>
@@ -1417,9 +1447,9 @@ export default function ScannerScreen() {
               <Ionicons name="arrow-back" size={22} color="#0f172a" />
             </Pressable>
             <View style={styles.headerTitleBox}>
-              <ThemedText style={styles.screenMainTitle}>Evidencia Fotográfica (Máximo 5)</ThemedText>
+              <ThemedText style={styles.screenMainTitle}>Evidencia Fotográfica</ThemedText>
               <ThemedText style={styles.screenSubTitle}>
-                Asegúrese de capturar las placas y el contexto de la infracción.
+                Paso 2 de 3: Capture hasta 5 fotografías del incidente
               </ThemedText>
             </View>
           </View>
@@ -1434,7 +1464,9 @@ export default function ScannerScreen() {
               pressed && { opacity: 0.8 },
             ]}
           >
-            <Ionicons name="camera" size={32} color="#F59E0B" />
+            <View style={styles.dashedPhotoIconCircle}>
+              <Ionicons name="camera" size={28} color="#0D6E5F" />
+            </View>
             <ThemedText style={styles.dashedPhotoText}>TOMAR FOTOGRAFÍA</ThemedText>
             <ThemedText style={styles.dashedPhotoSub}>
               {evidencias.length} de 5 fotografías adjuntas
@@ -1465,8 +1497,8 @@ export default function ScannerScreen() {
                         pressed && { opacity: 0.7, backgroundColor: '#E2E8F0' },
                       ]}
                     >
-                      <Ionicons name="camera-outline" size={22} color="#94a3b8" />
-                      <ThemedText style={{ fontSize: 9, color: '#94a3b8', marginTop: 2, fontWeight: '700' }}>
+                      <Ionicons name="camera-outline" size={20} color="#94a3b8" />
+                      <ThemedText style={styles.photoSlotEmptyText}>
                         + FOTO
                       </ThemedText>
                     </Pressable>
@@ -1481,16 +1513,20 @@ export default function ScannerScreen() {
             <Pressable
               onPress={async () => {
                 if (selectedVehicle && selectedInfraccion) {
+                  const finalDesc = selectedCategory === 'otro' && otraInfraccionTexto.trim()
+                    ? `[${otraInfraccionTexto.trim()}] ${descripcion}`.trim()
+                    : (descripcion || 'Borrador guardado.');
+
                   await agregarReporte(
                     {
                       vehiculoId: String(selectedVehicle.id_vehiculo),
                       corbatinNumero: selectedCorbatin?.numero ? `C-${selectedCorbatin.numero}` : 'S/C',
-                      infraccionCodigo: selectedInfraccion.codigo,
+                      infraccionCodigo: selectedCategory === 'otro' ? 'INF-OTRO' : selectedInfraccion.codigo,
                       idVehiculo: Number(selectedVehicle.id_vehiculo),
                       idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
-                      idInfraccion: Number(selectedInfraccion.id_infraccion) || 1,
+                      idInfraccion: selectedInfraccion.id_infraccion ? Number(selectedInfraccion.id_infraccion) : 1,
                       lugar: lugar,
-                      descripcion: descripcion || 'Borrador guardado.',
+                      descripcion: finalDesc,
                       observaciones: 'Guardado por el oficial.',
                       evidencias: evidencias,
                     },
@@ -1500,7 +1536,10 @@ export default function ScannerScreen() {
                   router.replace('/');
                 }
               }}
-              style={styles.draftOutlineBtn}
+              style={({ pressed }) => [
+                styles.draftOutlineBtn,
+                pressed && { opacity: 0.8 },
+              ]}
             >
               <ThemedText style={styles.draftOutlineBtnText}>Guardar Borrador</ThemedText>
             </Pressable>
@@ -1512,7 +1551,7 @@ export default function ScannerScreen() {
                 pressed && { opacity: 0.9 },
               ]}
             >
-              <Ionicons name="checkmark" size={16} color="#0f172a" style={{ marginRight: 4 }} />
+              <Ionicons name="checkmark" size={16} color="#ffffff" style={{ marginRight: 4 }} />
               <ThemedText style={styles.reviewYellowBtnText}>REVISAR REPORTE</ThemedText>
             </Pressable>
           </View>
@@ -1539,7 +1578,9 @@ export default function ScannerScreen() {
           <View style={styles.reviewCard}>
             <ThemedText style={styles.reviewCardTitle}>Detalles de la Infracción</ThemedText>
             <ThemedText style={styles.reviewCardText}>
-              <ThemedText style={{ fontWeight: 'bold' }}>Tipo:</ThemedText> {selectedInfraccion.codigo} - {selectedInfraccion.nombre}{'\n'}
+              <ThemedText style={{ fontWeight: 'bold' }}>Tipo:</ThemedText>{' '}
+              {selectedInfraccion.codigo} - {selectedInfraccion.nombre}
+              {'\n'}
               <ThemedText style={{ fontWeight: 'bold' }}>Ubicación:</ThemedText> {lugar}{'\n'}
               <ThemedText style={{ fontWeight: 'bold' }}>Fecha y Hora:</ThemedText> {fecha} a las {hora} hrs{'\n'}
               <ThemedText style={{ fontWeight: 'bold' }}>Descripción:</ThemedText> {descripcion || 'Sin descripción adicional'}
@@ -2363,6 +2404,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
+    justifyContent: 'space-between',
   },
   catCard: {
     width: '48.5%',
@@ -2375,6 +2417,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
     position: 'relative',
+    minHeight: 74,
+  },
+  catCardOtro: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    minHeight: 52,
   },
   catCardSelected: {
     borderColor: '#DC2626',
@@ -2384,6 +2436,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     color: '#475569',
+    textAlign: 'center',
   },
   catCardTextSelected: {
     color: '#DC2626',
@@ -2399,6 +2452,38 @@ const styles = StyleSheet.create({
     backgroundColor: '#DC2626',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  otherCategoryCard: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1.5,
+    borderColor: '#DC2626',
+    borderRadius: 14,
+    padding: 14,
+    gap: 8,
+    marginTop: 2,
+  },
+  otherCategoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  otherCategoryTitle: {
+    fontSize: 11.5,
+    fontWeight: '800',
+    color: '#991B1B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  otherCategoryInput: {
+    height: 44,
+    backgroundColor: '#ffffff',
+    borderWidth: 1.5,
+    borderColor: '#FCA5A5',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#0f172a',
   },
   incidentDetailsCard: {
     backgroundColor: '#ffffff',
@@ -2451,6 +2536,7 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 13.5,
     fontWeight: '900',
+    textAlign: 'center',
   },
   dashedPhotoBox: {
     borderWidth: 2,
@@ -2458,33 +2544,55 @@ const styles = StyleSheet.create({
     borderColor: '#0D6E5F',
     borderRadius: 16,
     backgroundColor: '#E6F4F1',
-    padding: 24,
+    paddingVertical: 22,
+    paddingHorizontal: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 8,
+  },
+  dashedPhotoIconCircle: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(13, 110, 95, 0.25)',
+    shadowColor: '#0D6E5F',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   dashedPhotoText: {
     fontSize: 14,
+    lineHeight: 18,
     fontWeight: '900',
     color: '#0D6E5F',
     letterSpacing: 0.5,
+    textAlign: 'center',
   },
   dashedPhotoSub: {
-    fontSize: 11,
+    fontSize: 12,
+    lineHeight: 16,
     fontWeight: '600',
     color: '#074239',
+    textAlign: 'center',
   },
   photoSlotsGrid: {
     flexDirection: 'row',
-    gap: 8,
     justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 6,
   },
   photoSlotBox: {
-    width: '18%',
+    flex: 1,
     aspectRatio: 1,
     borderRadius: 10,
     borderWidth: 1.5,
-    borderColor: '#e2e8f0',
+    borderColor: '#cbd5e1',
+    backgroundColor: '#f8fafc',
     overflow: 'hidden',
   },
   photoSlotFilled: {
@@ -2500,22 +2608,30 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 2,
     right: 2,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    width: 18,
+    height: 18,
+    borderRadius: 9,
     alignItems: 'center',
     justifyContent: 'center',
   },
   photoSlotEmpty: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#f8fafc',
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: 2,
+  },
+  photoSlotEmptyText: {
+    fontSize: 9.5,
+    lineHeight: 12,
+    color: '#64748B',
+    marginTop: 2,
+    fontWeight: '800',
+    textAlign: 'center',
   },
   wizardFooterRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 10,
     marginTop: 8,
   },
@@ -2528,25 +2644,37 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 8,
   },
   draftOutlineBtnText: {
     color: '#475569',
     fontSize: 13,
+    lineHeight: 16,
     fontWeight: '800',
+    textAlign: 'center',
   },
   reviewYellowBtn: {
-    flex: 1.4,
+    flex: 1.35,
     height: 48,
     borderRadius: 12,
     backgroundColor: '#0D6E5F',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    shadowColor: '#0D6E5F',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
   },
   reviewYellowBtnText: {
     color: '#ffffff',
     fontSize: 13,
+    lineHeight: 16,
     fontWeight: '900',
+    textAlign: 'center',
   },
   reviewCard: {
     backgroundColor: '#ffffff',

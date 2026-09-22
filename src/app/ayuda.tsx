@@ -307,9 +307,10 @@ export default function AyudaScreen() {
 
 const styles = StyleSheet.create({
   scrollContainer: {
-    padding: 18,
-    paddingBottom: 70,
-    gap: 16,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 80,
+    gap: 14,
   },
   miniResortTagBadge: {
     backgroundColor: 'rgba(0, 0, 0, 0.25)',
@@ -318,11 +319,15 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   miniResortTagText: {
     fontSize: 10,
+    lineHeight: 14,
     fontWeight: '800',
     color: '#ffffff',
+    textAlign: 'center',
   },
   searchContainer: {
     flexDirection: 'row',
@@ -372,6 +377,7 @@ const styles = StyleSheet.create({
   },
   categoryPillText: {
     fontSize: 12,
+    lineHeight: 16,
     fontWeight: '800',
     color: '#0D6E5F',
   },
@@ -384,12 +390,14 @@ const styles = StyleSheet.create({
   },
   sectionHeading: {
     fontSize: 15,
+    lineHeight: 20,
     fontWeight: '900',
     color: '#0f172a',
     letterSpacing: -0.2,
   },
   sectionSubtitle: {
     fontSize: 11.5,
+    lineHeight: 16,
     color: '#64748B',
     fontWeight: '600',
   },
@@ -431,6 +439,7 @@ const styles = StyleSheet.create({
   },
   faqTagText: {
     fontSize: 9.5,
+    lineHeight: 13,
     fontWeight: '800',
     color: '#0D6E5F',
     textTransform: 'uppercase',

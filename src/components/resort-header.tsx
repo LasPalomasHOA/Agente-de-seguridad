@@ -81,7 +81,7 @@ export function ResortHeader({ title, subtitle, rightElement }: ResortHeaderProp
 const styles = StyleSheet.create({
   headerContainer: {
     position: 'relative',
-    height: 78,
+    height: 84,
     borderRadius: 16,
     overflow: 'hidden',
     shadowColor: '#000',
@@ -101,25 +101,27 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 18,
+    paddingHorizontal: 16,
     gap: 12,
   },
   textColumn: {
     flex: 1,
-    gap: 3,
+    gap: 2,
   },
   titleText: {
-    fontSize: 18,
+    fontSize: 17.5,
     fontWeight: '900',
     color: '#ffffff',
-    letterSpacing: -0.3,
+    letterSpacing: -0.2,
   },
   subtitleText: {
-    fontSize: 11.5,
+    fontSize: 11,
+    lineHeight: 15,
     color: 'rgba(255, 255, 255, 0.88)',
     fontWeight: '500',
   },
   rightSlot: {
     alignItems: 'flex-end',
+    justifyContent: 'center',
   },
 });

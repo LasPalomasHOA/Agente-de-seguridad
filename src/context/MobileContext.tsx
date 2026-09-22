@@ -328,11 +328,14 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
 
       let infIdNum = nuevo.idInfraccion;
-      if (!infIdNum) {
-        const catalogo = catalogoInfracciones.length > 0 ? catalogoInfracciones : await SupabaseService.getCatalogoInfracciones();
-        const found = catalogo.find(
-          (c) => (c.codigo || '').toLowerCase() === (nuevo.infraccionCodigo || '').toLowerCase()
-        );
+      const catalogo = catalogoInfracciones.length > 0 ? catalogoInfracciones : await SupabaseService.getCatalogoInfracciones();
+      const validExists = catalogo.some((c) => Number(c.id_infraccion) === Number(infIdNum));
+
+      if (!infIdNum || !validExists) {
+        const found =
+          catalogo.find((c) => (c.codigo || '').toLowerCase() === (nuevo.infraccionCodigo || '').toLowerCase()) ||
+          catalogo.find((c) => (c.categoria || '').toLowerCase().includes('general') || (c.nombre || '').toLowerCase().includes('otro')) ||
+          catalogo[0];
         infIdNum = found ? Number(found.id_infraccion) : 1;
       }
 

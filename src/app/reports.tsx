@@ -644,9 +644,10 @@ export default function ReportsScreen() {
 
 const styles = StyleSheet.create({
   scrollContainer: {
-    padding: 18,
-    paddingBottom: 70,
-    gap: 16,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 80,
+    gap: 14,
   },
   miniResortActionBtn: {
     flexDirection: 'row',
@@ -666,20 +667,20 @@ const styles = StyleSheet.create({
   metricsSummaryRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 10,
+    gap: 8,
   },
   metricChip: {
     flex: 1,
-    minWidth: 130,
+    minWidth: 120,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#ffffff',
     borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
     borderWidth: 1.5,
     borderColor: '#E2E8F0',
-    gap: 10,
+    gap: 8,
   },
   metricChipActive: {
     borderColor: '#0D6E5F',

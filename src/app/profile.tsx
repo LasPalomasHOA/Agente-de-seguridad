@@ -502,9 +502,10 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   content: {
-    padding: Spacing.three,
-    paddingBottom: 110,
-    gap: 16,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 80,
+    gap: 14,
   },
   tabletGrid: {
     flexDirection: 'row',
