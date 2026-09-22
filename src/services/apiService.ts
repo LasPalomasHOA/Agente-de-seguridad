@@ -94,7 +94,7 @@ export const ImageCacheStore = {
     return safeStorage.getItem(`hoa_photo_veh_${idVehiculo}`);
   },
   setVehiclePhoto(idVehiculo: number | string, photoUrl: string): void {
-    if (!idVehiculo || !photoUrl || photoUrl.length < 50) return;
+    if (!idVehiculo || !photoUrl || typeof photoUrl !== 'string' || photoUrl.trim().length === 0) return;
     safeStorage.setItem(`hoa_photo_veh_${idVehiculo}`, photoUrl);
   },
   getUserAvatar(idUsuario: number | string): string | null {
@@ -102,7 +102,7 @@ export const ImageCacheStore = {
     return safeStorage.getItem(`hoa_photo_user_${idUsuario}`);
   },
   setUserAvatar(idUsuario: number | string, avatarUrl: string): void {
-    if (!idUsuario || !avatarUrl || avatarUrl.length < 50) return;
+    if (!idUsuario || !avatarUrl || typeof avatarUrl !== 'string' || avatarUrl.trim().length === 0) return;
     safeStorage.setItem(`hoa_photo_user_${idUsuario}`, avatarUrl);
   },
 };
@@ -113,24 +113,24 @@ export const EvidenciaCacheStore = {
     return safeStorage.getItem(`hoa_evidencia_${idEvidencia}`);
   },
   setFoto(idEvidencia: number | string, urlOrBase64: string): void {
-    if (!idEvidencia || !urlOrBase64 || urlOrBase64.length < 5) return;
+    if (!idEvidencia || !urlOrBase64 || typeof urlOrBase64 !== 'string' || urlOrBase64.trim().length === 0) return;
     safeStorage.setItem(`hoa_evidencia_${idEvidencia}`, urlOrBase64);
   },
 };
 
 export async function getEvidenciaFoto(idEvidencia: number | string): Promise<string | null> {
-  const cleanId = typeof idEvidencia === 'string' ? idEvidencia.replace(/\D/g, '') : idEvidencia;
-  if (!cleanId) return null;
+  if (!idEvidencia) return null;
+  const cleanId = typeof idEvidencia === 'string' ? idEvidencia.replace('ev_', '') : String(idEvidencia);
 
-  // 1. Verificar si ya existe en almacenamiento local (0 bytes Egress)
+  // 1. Revisar caché local (0 bytes Egress)
   const cached = EvidenciaCacheStore.getFoto(cleanId);
   if (cached) return cached;
 
-  // 2. Si no está en caché, consultar Supabase
+  // 2. Si no está en caché, consultar vía Supabase si está disponible
   if (isSupabaseConfigured()) {
     try {
       const { data, error } = await (supabase as any)
-        .from('evidencias')
+        .from('evidencias_infraccion')
         .select('archivo')
         .eq('id_evidencia', cleanId)
         .single();
@@ -146,6 +146,7 @@ export async function getEvidenciaFoto(idEvidencia: number | string): Promise<st
 
   return null;
 }
+
 export async function getVehiculoFoto(idVehiculo: number | string): Promise<string | null> {
   if (!idVehiculo) return null;
 
@@ -153,7 +154,19 @@ export async function getVehiculoFoto(idVehiculo: number | string): Promise<stri
   const cached = ImageCacheStore.getVehiclePhoto(idVehiculo);
   if (cached) return cached;
 
-  // 2. Si no está en caché, pedir solo la columna foto_url de ese vehículo puntual
+  // 2. Consultar vía Express API
+  try {
+    const v = await fetchJson(`/vehiculos/${idVehiculo}`);
+    const photo = v?.foto_url || v?.foto;
+    if (photo) {
+      ImageCacheStore.setVehiclePhoto(idVehiculo, photo);
+      return photo;
+    }
+  } catch {
+    // Fallback a Supabase si aplica
+  }
+
+  // 3. Fallback directo a Supabase
   if (isSupabaseConfigured()) {
     try {
       const { data, error } = await (supabase as any)
@@ -962,12 +975,19 @@ export const ApiService = {
 
       // Gestión y caché local de imagen del vehículo
       let finalFotoUrl = matchedVehiculo?.foto_url || matchedVehiculo?.foto;
-      if (finalFotoUrl && finalFotoUrl.length > 50) {
+      if (finalFotoUrl && typeof finalFotoUrl === 'string' && finalFotoUrl.trim().length > 0) {
         ImageCacheStore.setVehiclePhoto(matchedVehiculo?.id_vehiculo || 0, finalFotoUrl);
-      } else if (!finalFotoUrl && matchedVehiculo?.id_vehiculo) {
+      } else if (matchedVehiculo?.id_vehiculo) {
         const cachedPhoto = ImageCacheStore.getVehiclePhoto(matchedVehiculo.id_vehiculo);
         if (cachedPhoto) {
           finalFotoUrl = cachedPhoto;
+        } else {
+          try {
+            const directPhoto = await getVehiculoFoto(matchedVehiculo.id_vehiculo);
+            if (directPhoto) {
+              finalFotoUrl = directPhoto;
+            }
+          } catch { }
         }
       }
 
@@ -1926,32 +1946,34 @@ export const ApiService = {
         const data = await fetchJson('/vehiculos?limit=50');
         if (Array.isArray(data)) {
           return data.map((v: any) => {
-            // Guardar en caché local si Express envió foto y no saturar memoria activa
             const f = v.foto_url || v.foto;
-            if (f && f.length > 50 && v.id_vehiculo) {
+            if (f && v.id_vehiculo) {
               ImageCacheStore.setVehiclePhoto(v.id_vehiculo, f);
             }
             return {
               ...v,
-              // Omitir el Base64 del objeto en memoria para la lista general
-              foto_url: ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
+              foto_url: f || ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
             };
           });
         }
       } catch {
         if (isSupabaseConfigured()) {
-          // PROJECTIONS.VEHICULOS_LIGHT ya no debe incluir foto_url
           const { data } = await supabase
             .from('vehiculos')
             .select(PROJECTIONS.VEHICULOS_LIGHT)
             .limit(50);
 
           if (data && Array.isArray(data)) {
-            return data.map((v: any) => ({
-              ...v,
-              // Asignar desde caché local si existe, o null
-              foto_url: ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
-            })) as VehiculoRow[];
+            return data.map((v: any) => {
+              const f = v.foto_url || v.foto;
+              if (f && v.id_vehiculo) {
+                ImageCacheStore.setVehiclePhoto(v.id_vehiculo, f);
+              }
+              return {
+                ...v,
+                foto_url: f || ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
+              };
+            }) as VehiculoRow[];
           }
         }
       }
