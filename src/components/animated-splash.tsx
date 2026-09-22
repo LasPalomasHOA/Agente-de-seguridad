@@ -6,8 +6,8 @@ import {
   Animated,
   Dimensions,
   Platform,
-  Image,
 } from 'react-native';
+import { Image } from 'expo-image';
 import * as SplashScreen from 'expo-splash-screen';
 import { LinearGradient } from 'expo-linear-gradient';
 
@@ -161,7 +161,7 @@ export function AnimatedSplashScreen({
           <Image
             source={require('@/assets/images/logo.png')}
             style={styles.logoImage}
-            resizeMode="contain"
+            contentFit="contain"
           />
         </Animated.View>
 

@@ -27,6 +27,7 @@ import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccion
 import { Evidencia } from '../types/evidencia';
 import { comprimirImagen } from '../services/imageService';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 
 type Mode = 'camera' | 'loading' | 'result' | 'wizard' | 'confirmation';
 type WizardStep = 1 | 2 | 3;
@@ -147,6 +148,7 @@ export default function ScannerScreen() {
   const [manualCorbatinInput, setManualCorbatinInput] = useState('');
   const [laserAnim] = useState(new Animated.Value(0));
   const [lightboxPhoto, setLightboxPhoto] = useState<string | null>(null);
+  const [photoPickerModalVisible, setPhotoPickerModalVisible] = useState(false);
 
   // Wizard state (3 steps)
   const [step, setStep] = useState<WizardStep>(1);
@@ -413,38 +415,91 @@ export default function ScannerScreen() {
     setMode('wizard');
   };
 
-  const handleAddPhoto = async () => {
-    if (evidencias.length >= 5) return;
-
-    if (Platform.OS === 'web' && typeof document !== 'undefined') {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'image/*';
-      input.onchange = async (e: any) => {
-        const file = e.target?.files?.[0];
-        if (file) {
-          try {
-            const comp = await comprimirImagen(file, 800, 0.65);
-            const newEvidencia: Evidencia = {
-              id: `ev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-              fotoUrl: comp.base64 || comp.uri,
-              fechaHora: new Date().toISOString(),
-              isPrincipal: evidencias.length === 0,
-              descripcion: `Fotografía de evidencia levantada por oficial (${comp.sizeKB} KB).`,
-            };
-            setEvidencias((prev) => [...prev, newEvidencia]);
-            setPhotoCount((prev) => prev + 1);
-          } catch (err) {
-            console.warn('[Scanner] Error comprimiendo foto seleccionada:', err);
-          }
-        }
-      };
-      input.click();
+  const handleAddPhoto = () => {
+    if (evidencias.length >= 5) {
+      alert('Has alcanzado el límite máximo de 5 fotografías para este reporte.');
       return;
     }
+    setPhotoPickerModalVisible(true);
+  };
 
-    // Dispositivo móvil: si no se selecciona archivo, omitir
-    alert('Por favor selecciona una fotografía desde tu dispositivo.');
+  const handleTakePhotoFromCamera = async () => {
+    setPhotoPickerModalVisible(false);
+    if (evidencias.length >= 5) return;
+
+    try {
+      const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permissionResult.granted) {
+        alert('Se requieren permisos de cámara para capturar fotografías de evidencia.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const asset = result.assets[0];
+        const comp = await comprimirImagen(asset.uri, 800, 0.65);
+        const newEvidencia: Evidencia = {
+          id: `ev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          fotoUrl: comp.base64 || comp.uri,
+          fechaHora: new Date().toISOString(),
+          isPrincipal: evidencias.length === 0,
+          descripcion: `Fotografía de evidencia capturada por oficial (${comp.sizeKB} KB).`,
+        };
+        setEvidencias((prev) => [...prev, newEvidencia]);
+        setPhotoCount((prev) => prev + 1);
+      }
+    } catch (err: any) {
+      console.warn('[Scanner] Error capturando foto con cámara:', err);
+      alert(`Error al abrir la cámara: ${err?.message || 'Error desconocido'}`);
+    }
+  };
+
+  const handlePickPhotoFromLibrary = async () => {
+    setPhotoPickerModalVisible(false);
+    if (evidencias.length >= 5) return;
+
+    try {
+      const remainingSlots = 5 - evidencias.length;
+      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permissionResult.granted) {
+        alert('Se requieren permisos para acceder a la galería de fotos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsMultipleSelection: true,
+        selectionLimit: remainingSlots,
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const newItems: Evidencia[] = [];
+        for (const asset of result.assets) {
+          if (evidencias.length + newItems.length >= 5) break;
+          const comp = await comprimirImagen(asset.uri, 800, 0.65);
+          newItems.push({
+            id: `ev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            fotoUrl: comp.base64 || comp.uri,
+            fechaHora: new Date().toISOString(),
+            isPrincipal: evidencias.length === 0 && newItems.length === 0,
+            descripcion: `Fotografía de evidencia adjunta (${comp.sizeKB} KB).`,
+          });
+        }
+        if (newItems.length > 0) {
+          setEvidencias((prev) => [...prev, ...newItems]);
+          setPhotoCount((prev) => prev + newItems.length);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Scanner] Error seleccionando foto de galería:', err);
+      alert(`Error al seleccionar imagen: ${err?.message || 'Error desconocido'}`);
+    }
   };
 
   const handleDeletePhoto = (id: string) => {
@@ -1403,9 +1458,18 @@ export default function ScannerScreen() {
                       </Pressable>
                     </View>
                   ) : (
-                    <View style={styles.photoSlotEmpty}>
-                      <Ionicons name="image-outline" size={20} color="#cbd5e1" />
-                    </View>
+                    <Pressable
+                      onPress={handleAddPhoto}
+                      style={({ pressed }) => [
+                        styles.photoSlotEmpty,
+                        pressed && { opacity: 0.7, backgroundColor: '#E2E8F0' },
+                      ]}
+                    >
+                      <Ionicons name="camera-outline" size={22} color="#94a3b8" />
+                      <ThemedText style={{ fontSize: 9, color: '#94a3b8', marginTop: 2, fontWeight: '700' }}>
+                        + FOTO
+                      </ThemedText>
+                    </Pressable>
                   )}
                 </View>
               );
@@ -1729,6 +1793,77 @@ export default function ScannerScreen() {
           </View>
         </Modal>
       )}
+
+      {/* ─── MODAL SELECCIÓN / CAPTURA DE EVIDENCIA FOTOGRÁFICA ─── */}
+      <Modal
+        visible={photoPickerModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setPhotoPickerModalVisible(false)}
+      >
+        <Pressable
+          style={styles.pickerModalOverlay}
+          onPress={() => setPhotoPickerModalVisible(false)}
+        >
+          <Pressable style={styles.pickerModalCard} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.pickerModalHeader}>
+              <View style={styles.pickerModalDragBar} />
+              <ThemedText style={styles.pickerModalTitle}>Adjuntar Evidencia</ThemedText>
+              <ThemedText style={styles.pickerModalSubtitle}>
+                {evidencias.length} de 5 fotografías seleccionadas
+              </ThemedText>
+            </View>
+
+            <View style={styles.pickerOptionsContainer}>
+              <Pressable
+                onPress={handleTakePhotoFromCamera}
+                style={({ pressed }) => [
+                  styles.pickerOptionBtn,
+                  styles.pickerCameraBtn,
+                  pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                ]}
+              >
+                <View style={styles.pickerIconWrapGold}>
+                  <Ionicons name="camera" size={24} color="#D97706" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <ThemedText style={styles.pickerOptionTitle}>Tomar Fotografía con Cámara</ThemedText>
+                  <ThemedText style={styles.pickerOptionSub}>Abre la cámara del dispositivo para capturar evidencia en vivo</ThemedText>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
+              </Pressable>
+
+              <Pressable
+                onPress={handlePickPhotoFromLibrary}
+                style={({ pressed }) => [
+                  styles.pickerOptionBtn,
+                  styles.pickerGalleryBtn,
+                  pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                ]}
+              >
+                <View style={styles.pickerIconWrapTeal}>
+                  <Ionicons name="images" size={24} color="#0D6E5F" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <ThemedText style={styles.pickerOptionTitle}>Elegir de Galería / Archivos</ThemedText>
+                  <ThemedText style={styles.pickerOptionSub}>Selecciona una o más fotos guardadas en el dispositivo</ThemedText>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
+              </Pressable>
+            </View>
+
+            <Pressable
+              onPress={() => setPhotoPickerModalVisible(false)}
+              style={({ pressed }) => [
+                styles.pickerCancelBtn,
+                pressed && { opacity: 0.8 },
+              ]}
+            >
+              <ThemedText style={styles.pickerCancelBtnText}>Cancelar</ThemedText>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -3316,5 +3451,102 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '900',
     color: '#059669',
+  },
+  pickerModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    justifyContent: 'flex-end',
+  },
+  pickerModalCard: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 20,
+  },
+  pickerModalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  pickerModalDragBar: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#CBD5E1',
+    marginBottom: 12,
+  },
+  pickerModalTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  pickerModalSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+    fontWeight: '500',
+  },
+  pickerOptionsContainer: {
+    gap: 12,
+    marginBottom: 16,
+  },
+  pickerOptionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    gap: 14,
+  },
+  pickerCameraBtn: {
+    backgroundColor: '#FFFBEB',
+    borderColor: '#FDE68A',
+  },
+  pickerGalleryBtn: {
+    backgroundColor: '#F0FDFA',
+    borderColor: '#CCFBF1',
+  },
+  pickerIconWrapGold: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#FEF3C7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerIconWrapTeal: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#CCFBF1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerOptionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  pickerOptionSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  pickerCancelBtn: {
+    backgroundColor: '#F1F5F9',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  pickerCancelBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#475569',
   },
 });

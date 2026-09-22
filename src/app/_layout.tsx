@@ -60,7 +60,7 @@ function DashboardShell() {
             <Image
               source={require('@/assets/images/lp-logo.png')}
               style={styles.sidebarLogoImg}
-              resizeMode="contain"
+              contentFit="contain"
             />
             <ThemedText style={styles.sidebarBrandSubtitle}>
               CONTROL OPERATIVO &bull; SEGURIDAD
@@ -168,7 +168,7 @@ function DashboardShell() {
               <Image
                 source={require('@/assets/images/lp-logo.png')}
                 style={styles.mobileTopLogoImg}
-                resizeMode="contain"
+                contentFit="contain"
               />
             </View>
 

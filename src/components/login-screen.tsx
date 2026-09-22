@@ -4,12 +4,12 @@ import {
   StyleSheet,
   TextInput,
   Pressable,
-  Image,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
   Animated,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ThemedText } from './themed-text';
@@ -139,7 +139,7 @@ export function LoginScreen() {
                 <Image
                   source={require('@/assets/images/lp-logo.png')}
                   style={styles.cardLogoImg}
-                  resizeMode="contain"
+                  contentFit="contain"
                 />
                 <ThemedText style={styles.cardMainTitle}>
                   Plataforma Operativa HOA
