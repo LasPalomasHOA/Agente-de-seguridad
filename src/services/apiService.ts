@@ -130,7 +130,7 @@ export async function getEvidenciaFoto(idEvidencia: number | string): Promise<st
   if (isSupabaseConfigured()) {
     try {
       const { data, error } = await (supabase as any)
-        .from('evidencias_infraccion')
+        .from('evidencias')
         .select('archivo')
         .eq('id_evidencia', cleanId)
         .single();
