@@ -21,7 +21,6 @@ import { Spacing } from '@/constants/theme';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
-import { Select } from '../components/ui/select';
 import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
 import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow, BitacoraAccesoRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
@@ -168,7 +167,7 @@ export default function ScannerScreen() {
   const [step, setStep] = useState<WizardStep>(1);
   const [selectedCategory, setSelectedCategory] = useState<string>('seguridad');
   const [selectedInfraccion, setSelectedInfraccion] = useState<CatalogoInfraccionRow | null>(() => catalogoInfracciones[0] || null);
-  const [lugar, setLugar] = useState('Estacionamiento Norte');
+  const [lugar, setLugar] = useState('');
   const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
   const [hora, setHora] = useState(new Date().toTimeString().split(' ')[0].substring(0, 5));
   const [descripcion, setDescripcion] = useState('');
@@ -462,6 +461,7 @@ export default function ScannerScreen() {
       activo: true,
     };
     setSelectedInfraccion(defaultInf);
+    setLugar('');
     setDescripcion('');
     setEvidencias([]);
     setPhotoCount(0);
@@ -593,7 +593,7 @@ export default function ScannerScreen() {
           idVehiculo: Number(selectedVehicle.id_vehiculo),
           idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
           idInfraccion: selectedInfraccion.id_infraccion ? Number(selectedInfraccion.id_infraccion) : 7,
-          lugar: lugar,
+          lugar: lugar.trim() || 'No especificada',
           descripcion: finalDesc,
           observaciones: 'Evidencias registradas desde el dispositivo de oficial.',
           evidencias: evidencias,
@@ -1192,12 +1192,12 @@ export default function ScannerScreen() {
                         <ThemedText style={styles.historyRowTitle}>
                           {isVehicleInside
                             ? (isAccesoToday
-                                ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`
-                                : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`)
+                              ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`
+                              : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`)
                             : ultimoAcceso?.hora_salida
                               ? (isAccesoToday
-                                  ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
-                                  : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`)
+                                ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
+                                : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`)
                               : 'Sin registro de estancia activo.'}
                         </ThemedText>
                         <ThemedText style={styles.historyRowSubtitle}>
@@ -1435,19 +1435,32 @@ export default function ScannerScreen() {
             {/* Detalles del Incidente Form */}
             <ThemedText style={styles.sectionFormTitle}>Detalles del Incidente</ThemedText>
             <View style={styles.incidentDetailsCard}>
-              <Select
-                label="Ubicación del Incidente"
-                value={lugar}
-                onValueChange={setLugar}
-                options={[
-                  { label: 'Estacionamiento Norte', value: 'Estacionamiento Norte' },
-                  { label: 'Estacionamiento Sur', value: 'Estacionamiento Sur' },
-                  { label: 'Área de Construcción', value: 'Área de Construcción' },
-                  { label: 'Lobby Principal', value: 'Lobby Principal' },
-                  { label: 'Alberca / Playa', value: 'Alberca / Playa' },
-                  { label: 'Acceso de Proveedores', value: 'Acceso de Proveedores' },
-                ]}
-              />
+              <View style={{ gap: 6 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <ThemedText style={styles.inputFieldLabel}>Ubicación del Incidente</ThemedText>
+                </View>
+                <View style={styles.locationInputWrapper}>
+                  <Ionicons name="location" size={18} color="#0D6E5F" style={{ marginLeft: 12, marginRight: 8 }} />
+                  <TextInput
+                    placeholder="Ej: Córdoba Sotano 2"
+                    placeholderTextColor="#94a3b8"
+                    value={lugar}
+                    onChangeText={setLugar}
+                    style={styles.locationTextInput}
+                    autoCapitalize="sentences"
+                    returnKeyType="next"
+                  />
+                  {lugar.length > 0 && (
+                    <Pressable
+                      onPress={() => setLugar('')}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      style={{ paddingRight: 12 }}
+                    >
+                      <Ionicons name="close-circle" size={18} color="#94a3b8" />
+                    </Pressable>
+                  )}
+                </View>
+              </View>
 
               <View style={styles.grid2Col}>
                 <View style={styles.dataCol}>
@@ -1480,7 +1493,13 @@ export default function ScannerScreen() {
 
             {/* Continue Button */}
             <Pressable
-              onPress={() => setStep(2)}
+              onPress={() => {
+                if (!lugar.trim()) {
+                  alert('Por favor ingrese la ubicación del incidente.');
+                  return;
+                }
+                setStep(2);
+              }}
               style={({ pressed }) => [
                 styles.navyActionBtn,
                 pressed && { opacity: 0.9 },
@@ -1636,7 +1655,7 @@ export default function ScannerScreen() {
               <ThemedText style={{ fontWeight: 'bold' }}>Tipo:</ThemedText>{' '}
               {selectedInfraccion.codigo} - {selectedInfraccion.nombre}
               {'\n'}
-              <ThemedText style={{ fontWeight: 'bold' }}>Ubicación:</ThemedText> {lugar}{'\n'}
+              <ThemedText style={{ fontWeight: 'bold' }}>Ubicación:</ThemedText> {lugar.trim() || 'No especificada'}{'\n'}
               <ThemedText style={{ fontWeight: 'bold' }}>Fecha y Hora:</ThemedText> {fecha} a las {hora} hrs{'\n'}
               <ThemedText style={{ fontWeight: 'bold' }}>Descripción:</ThemedText> {descripcion || 'Sin descripción adicional'}
             </ThemedText>
@@ -2547,6 +2566,23 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: '#e2e8f0',
     gap: 12,
+  },
+  locationInputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 46,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+    borderRadius: 10,
+  },
+  locationTextInput: {
+    flex: 1,
+    height: '100%',
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#0f172a',
+    paddingVertical: 0,
   },
   inputFieldLabel: {
     fontSize: 11,

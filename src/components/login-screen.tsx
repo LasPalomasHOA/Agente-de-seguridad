@@ -83,12 +83,6 @@ export function LoginScreen() {
     }
   };
 
-  const handleFillDemo = (u: string, p: string) => {
-    setUsuario(u);
-    setContrasena(p);
-    setError(null);
-  };
-
   return (
     <View style={styles.mainWrapper}>
       {/* ─── Smooth Animated 3-Photo Background Slideshow (100% Screen Adapted) ─── */}
@@ -236,17 +230,6 @@ export function LoginScreen() {
               >
                 <ThemedText style={styles.submitBtnText}>Iniciar Sesión</ThemedText>
                 <Ionicons name="arrow-forward" size={18} color="#ffffff" style={{ marginLeft: 6 }} />
-              </Pressable>
-
-              {/* Quick Demo Access Pill */}
-              <Pressable
-                onPress={() => handleFillDemo('agente', '1234')}
-                style={styles.demoPill}
-              >
-                <Ionicons name="flash" size={13} color="#0D6E5F" style={{ marginRight: 4 }} />
-                <ThemedText style={styles.demoPillText}>
-                  Acceso Rápido Demo: agente / 1234
-                </ThemedText>
               </Pressable>
             </View>
 
@@ -401,22 +384,6 @@ const styles = StyleSheet.create({
     fontSize: 14.5,
     fontWeight: '900',
     letterSpacing: 0.3,
-  },
-  demoPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    backgroundColor: '#E6F4F1',
-    borderWidth: 1,
-    borderColor: '#0D6E5F',
-  },
-  demoPillText: {
-    color: '#0D6E5F',
-    fontSize: 12,
-    fontWeight: '800',
   },
   footerNote: {
     flexDirection: 'row',
