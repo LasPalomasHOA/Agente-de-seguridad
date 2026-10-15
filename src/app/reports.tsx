@@ -441,7 +441,14 @@ export default function ReportsScreen() {
                     </View>
                     <View style={styles.thumbMiniList}>
                       {rep.evidencias.slice(0, 3).map((ev) => (
-                        <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.cardMiniPhotoThumb} cachePolicy="memory-disk" />
+                        <Image
+                          key={ev.id}
+                          recyclingKey={ev.id}
+                          source={{ uri: ev.fotoUrl }}
+                          style={styles.cardMiniPhotoThumb}
+                          cachePolicy="memory-disk"
+                          allowDownscaling={true}
+                        />
                       ))}
                     </View>
                   </View>
@@ -600,9 +607,12 @@ export default function ReportsScreen() {
                             ev.fotoUrl ? (
                               <Pressable key={ev.id} onPress={() => setZoomPhoto(ev.fotoUrl)}>
                                 <Image
+                                  key={ev.id}
+                                  recyclingKey={ev.id}
                                   source={{ uri: ev.fotoUrl }}
                                   style={styles.modalPhotoThumbLarge}
                                   cachePolicy="memory-disk"
+                                  allowDownscaling={true}
                                 />
                               </Pressable>
                             ) : null

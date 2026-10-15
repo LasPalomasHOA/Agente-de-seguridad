@@ -791,13 +791,13 @@ export const ApiService = {
       for (const key of aliasKeys) {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
         if (cachedResult && cachedResult.vehiculo && Number(cachedResult.vehiculo.id_vehiculo) > 0) {
-          // Consultar en vivo el último acceso y las sanciones activas
+          // Consultar en vivo el último acceso y las sanciones activas (respetando TTL_SANCIONES de 30s)
           const [liveAcceso, liveSanciones] = await Promise.all([
             this.getUltimoAcceso(
               cachedResult.vehiculo.id_vehiculo,
               cachedResult.corbatin?.id_corbatin
             ),
-            this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: true }),
+            this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: false }),
           ]);
 
           cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
@@ -1148,9 +1148,47 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene los reglamentos con caché persistente (TTL 30 min) y proyección de campos
+   * Obtiene los reglamentos verificando primero si existen nuevos registros (Delta Check de ~50 bytes)
    */
   async getReglamentos(forceRefresh = false): Promise<ReglamentoRow[]> {
+    const cached = apiCache.get<ReglamentoRow[]>('reglamentos_list', TTL_STATIC_CATALOGS);
+
+    // Si tenemos caché y no es un refresh forzado manual, hacemos un "ping" ultraligero
+    // para comprobar si se subió un reglamento nuevo o cambió cuál está vigente
+    if (cached && cached.length > 0 && !forceRefresh && isSupabaseConfigured()) {
+      try {
+        const { data: headCheck, count } = await (supabase as any)
+          .from('reglamentos')
+          .select('id_reglamento, version, vigente', { count: 'exact' })
+          .order('id_reglamento', { ascending: false })
+          .limit(1);
+
+        if (headCheck && headCheck.length > 0) {
+          const latestDb = headCheck[0];
+          const latestCached = cached.reduce(
+            (max, r) => (r.id_reglamento > max.id_reglamento ? r : max),
+            cached[0]
+          );
+
+          const sameCount = count === null || count === cached.length;
+          const sameLatest =
+            Number(latestDb.id_reglamento) === Number(latestCached.id_reglamento) &&
+            latestDb.version === latestCached.version &&
+            Boolean(latestDb.vigente) === Boolean(latestCached.vigente);
+
+          // Si no hay reglamentos nuevos ni cambios de vigencia, devolvemos el caché (0 Egress pesado)
+          if (sameCount && sameLatest) {
+            return cached;
+          }
+          // Si cambió algo en la BD, forzamos la actualización del caché abajo
+          forceRefresh = true;
+        }
+      } catch {
+        // Si falla el ping por red inestable, retornar caché seguro
+        return cached;
+      }
+    }
+
     return apiCache.getOrFetch(
       'reglamentos_list',
       TTL_STATIC_CATALOGS,
@@ -1356,26 +1394,19 @@ export const ApiService = {
             }
           }
 
-          // Guardar cada evidencia en la tabla evidencias vinculada al reporte
+          // Guardar cada evidencia en la tabla evidencias vinculada al reporte en batch sin roundtrips (0 bytes Egress de retorno)
           if (resReporteId && processedEvidencias.length > 0) {
-            for (const ev of processedEvidencias) {
-              const { data: evData } = await (supabase as any)
-                .from('evidencias')
-                .insert({
-                  id_reporte: resReporteId,
-                  archivo: ev.fotoUrl,
-                  descripcion: ev.descripcion || 'Fotografía de evidencia levantada por oficial.',
-                  fecha_captura: ev.fechaHora || now.toISOString(),
-                  id_usuario: params.idUsuario,
-                  activa: true,
-                })
-                .select('id_evidencia')
-                .single();
+            const rowsToInsert = processedEvidencias.map((ev) => ({
+              id_reporte: resReporteId,
+              archivo: ev.fotoUrl,
+              descripcion: ev.descripcion || 'Fotografía de evidencia levantada por oficial.',
+              fecha_captura: ev.fechaHora || now.toISOString(),
+              id_usuario: params.idUsuario,
+              activa: true,
+            }));
 
-              if (evData?.id_evidencia) {
-                EvidenciaCacheStore.setFoto(evData.id_evidencia, ev.fotoUrl);
-              }
-            }
+            // Un solo request HTTP batch y sin .select() de retorno (0 bytes de Egress)
+            await (supabase as any).from('evidencias').insert(rowsToInsert);
           }
         } catch (supabaseInsertErr) {
           console.warn('[ApiService] Error al insertar reporte/evidencias en Supabase:', supabaseInsertErr);
@@ -1389,14 +1420,18 @@ export const ApiService = {
       }
 
       if (params.idVehiculo) {
-        // Invalida conteos y sanciones específicas
+        const cachedVehLookup = apiCache.get<CorbatinLookupResult>(`lookup_veh_${params.idVehiculo}`, TTL_LOOKUPS);
+        if (cachedVehLookup?.corbatin?.numero) {
+          apiCache.invalidate(`lookup_num_${cachedVehLookup.corbatin.numero}`);
+        }
+        if (cachedVehLookup?.vehiculo?.placas) {
+          const cleanP = cachedVehLookup.vehiculo.placas.toUpperCase().replace(/[-_ ]/g, '');
+          apiCache.invalidate(`lookup_plate_${cleanP}`);
+        }
         apiCache.invalidate(`reportes_count_${params.idVehiculo}`);
         apiCache.invalidate(`sanciones_list_${params.idVehiculo}`);
         apiCache.invalidate(`reportes_list_all_${params.idVehiculo}`);
         apiCache.invalidate(`lookup_veh_${params.idVehiculo}`);
-
-        // Purgar cualquier lookup previo para forzar recálculo de sanciones en escaneo
-        apiCache.invalidate('lookup_');
       }
 
       if (params.idCorbatin) {
@@ -1520,7 +1555,7 @@ export const ApiService = {
             let query = (supabase as any)
               .from('reportes_infracciones')
               .select(
-                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, evidencias(id_evidencia, archivo, descripcion, fecha_captura)'
+                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, corbatines(numero), catalogo_infracciones(codigo), evidencias(id_evidencia, archivo, descripcion, fecha_captura)'
               )
               .order('id_reporte', { ascending: false })
               .limit(queryLimit);
@@ -1856,6 +1891,7 @@ export const ApiService = {
       await fetchJson('/bitacora', {
         method: 'POST',
         body: JSON.stringify({
+          id_acceso: params.idAcceso || null,
           id_caseta: params.idCaseta || 1,
           id_vehiculo: params.idVehiculo,
           id_corbatin: params.idCorbatin || null,
@@ -2053,7 +2089,7 @@ export const ApiService = {
       TTL_SANCIONES,
       async () => {
         try {
-          const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}&limit=20` : '?limit=20';
+          const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}&estatus=activa&limit=10` : '?estatus=activa&limit=10';
           const data = await fetchJson(`/sanciones${queryParam}`);
           if (Array.isArray(data)) {
             if (idVehiculo) {
@@ -2066,7 +2102,8 @@ export const ApiService = {
             let query = (supabase as any)
               .from('sanciones' as any)
               .select(PROJECTIONS.SANCIONES_LIGHT)
-              .limit(20);
+              .in('estatus', ['activa', 'ACTIVA', 'activo'])
+              .limit(10);
             if (idVehiculo) query = query.eq('id_vehiculo', idVehiculo);
             const { data } = await query;
             if (data && Array.isArray(data)) {

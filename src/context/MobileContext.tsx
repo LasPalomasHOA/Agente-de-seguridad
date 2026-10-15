@@ -135,25 +135,12 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         ? idUsuario
         : (currentAgenteId ? parseInt(currentAgenteId.replace(/\D/g, ''), 10) : undefined);
 
-      const [dbReportes, corbatinesList] = await Promise.all([
-        SupabaseService.getReportes({
-          idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
-          limit: 30,
-          forceRefresh,
-        }),
-        SupabaseService.getCorbatines().catch(() => []),
-      ]);
-
-      const corbatinMap = new Map<number, number>();
-      const vehiculoCorbatinMap = new Map<number, number>();
-      if (Array.isArray(corbatinesList)) {
-        corbatinesList.forEach((c: any) => {
-          if (c && c.numero !== undefined && c.numero !== null) {
-            if (c.id_corbatin) corbatinMap.set(Number(c.id_corbatin), Number(c.numero));
-            if (c.id_vehiculo) vehiculoCorbatinMap.set(Number(c.id_vehiculo), Number(c.numero));
-          }
-        });
-      }
+      // Se elimina SupabaseService.getCorbatines() en paralelo (ahorro de 50 filas por carga)
+      const dbReportes = await SupabaseService.getReportes({
+        idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
+        limit: 30,
+        forceRefresh,
+      });
 
       if (dbReportes && dbReportes.length > 0) {
         const mapped: ReporteInfraccion[] = dbReportes.map((r: any) => {
@@ -166,12 +153,14 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             ? 'borrador'
             : 'pendiente';
 
+          const corbRel = Array.isArray(r.corbatines) ? r.corbatines[0] : r.corbatines;
+          const infRel = Array.isArray(r.catalogo_infracciones) ? r.catalogo_infracciones[0] : r.catalogo_infracciones;
+
           const resolvedNumero =
             r.corbatin?.numero ??
             r.corbatines?.numero ??
-            r.numero ??
-            (r.id_corbatin ? corbatinMap.get(Number(r.id_corbatin)) : undefined) ??
-            (r.id_vehiculo ? vehiculoCorbatinMap.get(Number(r.id_vehiculo)) : undefined);
+            corbRel?.numero ??
+            r.numero;
 
           const corbatinNumeroStr = resolvedNumero !== undefined && resolvedNumero !== null
             ? `C-${resolvedNumero}`
@@ -182,7 +171,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             folio: `F-2026-${String(r.id_reporte).padStart(4, '0')}`,
             vehiculoId: String(r.id_vehiculo),
             corbatinNumero: corbatinNumeroStr,
-            infraccionCodigo: r.infraccion?.codigo || r.catalogo_infracciones?.codigo || 'INF-01',
+            infraccionCodigo: r.infraccion?.codigo || r.catalogo_infracciones?.codigo || infRel?.codigo || 'INF-01',
             lugar: r.ubicacion_texto || 'Área Común',
             fecha: (r.fecha_hora || '').split('T')[0] || new Date().toISOString().split('T')[0],
             hora: (r.fecha_hora || '').split('T')[1]?.substring(0, 5) || '12:00',

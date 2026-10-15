@@ -89,6 +89,19 @@ const formatHora = (timeStr?: string | null): string | null => {
   return null;
 };
 
+const formatFecha = (dateStr?: string | null): string => {
+  if (!dateStr || typeof dateStr !== 'string') return '';
+  const clean = dateStr.trim();
+  if (!clean || clean === 'null' || clean === 'undefined') return '';
+  const datePart = clean.includes('T') ? clean.split('T')[0] : (clean.includes(' ') ? clean.split(' ')[0] : clean);
+  const parts = datePart.split('-');
+  if (parts.length === 3) {
+    const [y, m, d] = parts;
+    return `${d}/${m}/${y}`;
+  }
+  return datePart;
+};
+
 export const parseSqlUtcDate = (dateStr?: string | null): number => {
   if (!dateStr || typeof dateStr !== 'string') return Date.now();
   let clean = dateStr.trim();
@@ -201,15 +214,50 @@ export default function ScannerScreen() {
     return !!fechaStr && fechaStr.startsWith(todayStr);
   }, [ultimoAcceso]);
 
+  // Un vehículo permanece dentro del complejo desde que ingresa hasta que el oficial en caseta marque su salida manualmente,
+  // sin importar que transcurra la medianoche o pasen días (toda salida debe ser registrada manualmente en caseta).
   const isVehicleInside = React.useMemo(() => {
-    if (!ultimoAcceso || !isAccesoToday) return false;
-    const hasEntered = !!ultimoAcceso.hora_entrada;
-    const hasNotExited = !ultimoAcceso.hora_salida && ultimoAcceso.estatus_acceso !== 'salida';
+    if (!ultimoAcceso) return false;
+    const estatusLower = (ultimoAcceso.estatus_acceso || '').toLowerCase();
+    const hasEntered = !!ultimoAcceso.hora_entrada && estatusLower !== 'denegado';
+    const hasNotExited = !ultimoAcceso.hora_salida && estatusLower !== 'salida';
     return hasEntered && hasNotExited;
-  }, [ultimoAcceso, isAccesoToday]);
+  }, [ultimoAcceso]);
 
   const tiempoEstancia = React.useMemo(() => {
     if (!ultimoAcceso?.hora_entrada) return '';
+
+    // 1. Intentar cálculo real multidiario basado en timestamps absolutos
+    let entryMs: number | null = null;
+    const rawEntry = ultimoAcceso.hora_entrada.trim();
+    if (rawEntry.includes('T') || (rawEntry.includes('-') && rawEntry.includes(' '))) {
+      entryMs = parseSqlUtcDate(rawEntry);
+    } else if (ultimoAcceso.fecha && /^\d{4}-\d{2}-\d{2}$/.test(ultimoAcceso.fecha)) {
+      entryMs = parseSqlUtcDate(`${ultimoAcceso.fecha}T${rawEntry}`);
+    } else if (ultimoAcceso.created_at) {
+      entryMs = parseSqlUtcDate(ultimoAcceso.created_at);
+    }
+
+    if (entryMs && !isNaN(entryMs)) {
+      const diffMs = Date.now() - entryMs;
+      if (diffMs > 0) {
+        const totalMinutes = Math.floor(diffMs / (60 * 1000));
+        if (totalMinutes < 1) return 'Menos de 1 min';
+        const days = Math.floor(totalMinutes / (24 * 60));
+        const remHours = Math.floor((totalMinutes % (24 * 60)) / 60);
+        const mins = totalMinutes % 60;
+
+        if (days > 0) {
+          return `${days}d ${remHours}h ${mins}m`;
+        }
+        if (remHours > 0) {
+          return `${remHours}h ${mins}m`;
+        }
+        return `${mins} min`;
+      }
+    }
+
+    // 2. Fallback de tiempo para horas simples HH:mm
     const timeVal = formatHora(ultimoAcceso.hora_entrada);
     if (!timeVal) return '';
 
@@ -223,7 +271,6 @@ export default function ScannerScreen() {
         const currentMin = now.getMinutes();
 
         let totalMinutes = (currentHour * 60 + currentMin) - (entryHour * 60 + entryMin);
-        // Si cruzó la medianoche
         if (totalMinutes < 0) totalMinutes += 24 * 60;
         if (totalMinutes < 1) return 'Menos de 1 min';
         const hrs = Math.floor(totalMinutes / 60);
@@ -249,7 +296,11 @@ export default function ScannerScreen() {
 
       if (res && res.success) {
         const salidaFmt = formatHora(res.horaSalida) || res.horaSalida.substring(0, 5);
-        const entradaFmt = formatHora(ultimoAcceso?.hora_entrada) || undefined;
+        const horaEntradaBase = formatHora(ultimoAcceso?.hora_entrada);
+        const entradaFmt = isAccesoToday
+          ? (horaEntradaBase || undefined)
+          : (ultimoAcceso?.fecha ? `${formatFecha(ultimoAcceso.fecha)} ${horaEntradaBase || ''}`.trim() : (horaEntradaBase || undefined));
+
         setExitSuccessModal({
           visible: true,
           horaSalida: salidaFmt,
@@ -1140,10 +1191,14 @@ export default function ScannerScreen() {
                       <View style={{ flex: 1 }}>
                         <ThemedText style={styles.historyRowTitle}>
                           {isVehicleInside
-                            ? `🟢 Acceso activo registrado a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`
-                            : isAccesoToday && formatHora(ultimoAcceso?.hora_salida)
-                              ? `⚪ Última salida registrada a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
-                              : 'Sin registro de estancia activo el día de hoy.'}
+                            ? (isAccesoToday
+                                ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`
+                                : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`)
+                            : ultimoAcceso?.hora_salida
+                              ? (isAccesoToday
+                                  ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
+                                  : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`)
+                              : 'Sin registro de estancia activo.'}
                         </ThemedText>
                         <ThemedText style={styles.historyRowSubtitle}>
                           {isVehicleInside
