@@ -7,7 +7,12 @@ import {
   Platform,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import {
+  SafeAreaProvider,
+  initialWindowMetrics,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { MobileProvider, useMobile } from '../context/MobileContext';
 import { LoginScreen } from '../components/login-screen';
@@ -23,6 +28,7 @@ function DashboardShell() {
   const router = useRouter();
   const pathname = usePathname();
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
 
   // Breakpoint: Desktop / horizontal tablet >= 768px
   const isDesktop = width >= 768;
@@ -51,10 +57,11 @@ function DashboardShell() {
   }
 
   return (
-    <SafeAreaView style={styles.shellRoot}>
+    <View style={styles.shellRoot}>
+      <StatusBar style="dark" />
       {/* ─── 1. UNIFIED LEFT SIDEBAR (Desktop >= 768px) ─── */}
       {isDesktop && (
-        <View style={styles.sidebar}>
+        <View style={[styles.sidebar, { paddingTop: Math.max(insets.top, 20), paddingBottom: Math.max(insets.bottom, 16) }]}>
           {/* Official Brand Logo & Subtitle */}
           <View style={styles.sidebarBrandSection}>
             <Image
@@ -160,10 +167,10 @@ function DashboardShell() {
       )}
 
       {/* ─── 2. MAIN CONTENT COLUMN ─── */}
-      <View style={styles.contentColumn}>
-        {/* Mobile Header (< 768px) */}
+      <View style={[styles.contentColumn, isDesktop && { paddingTop: insets.top }]}>
+        {/* Mobile Header (< 768px) - Extendido detrás de la StatusBar con padding seguro */}
         {!isDesktop && (
-          <View style={styles.mobileTopBar}>
+          <View style={[styles.mobileTopBar, { paddingTop: Math.max(insets.top, 12), paddingBottom: 10 }]}>
             <View style={styles.mobileTopLeft}>
               <Image
                 source={require('@/assets/images/lp-logo.png')}
@@ -199,7 +206,7 @@ function DashboardShell() {
 
         {/* Desktop Footer (>= 768px) */}
         {isDesktop && (
-          <View style={styles.desktopFooter}>
+          <View style={[styles.desktopFooter, { paddingBottom: Math.max(insets.bottom, 12) }]}>
             <ThemedText style={styles.desktopFooterText}>
               Las Palomas v2.4.1 - Conectado &bull; Sistema Operativo Integral
             </ThemedText>
@@ -211,9 +218,9 @@ function DashboardShell() {
           </View>
         )}
 
-        {/* Mobile Bottom Navigation (< 768px) */}
+        {/* Mobile Bottom Navigation (< 768px) - Extendido detrás de la barra de navegación del sistema */}
         {!isDesktop && (
-          <View style={styles.mobileBottomNav}>
+          <View style={[styles.mobileBottomNav, { paddingBottom: Math.max(insets.bottom, 10), paddingTop: 8 }]}>
             {NAV_ITEMS.map((item) => {
               const isActive =
                 item.id === '/'
@@ -248,7 +255,7 @@ function DashboardShell() {
           </View>
         )}
       </View>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -256,7 +263,7 @@ export default function RootLayout() {
   const [showSplash, setShowSplash] = useState(true);
 
   return (
-    <SafeAreaProvider>
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
       <MobileProvider>
         <View style={{ flex: 1, backgroundColor: '#042F2E' }}>
           <DashboardShell />

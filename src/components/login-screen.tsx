@@ -10,7 +10,8 @@ import {
   Animated,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ThemedText } from './themed-text';
 import { useMobile } from '../context/MobileContext';
@@ -27,6 +28,7 @@ const RESORT_BACKGROUNDS = [
 export function LoginScreen() {
   const { login } = useMobile();
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
 
   const [usuario, setUsuario] = useState('');
   const [contrasena, setContrasena] = useState('');
@@ -85,6 +87,8 @@ export function LoginScreen() {
 
   return (
     <View style={styles.mainWrapper}>
+      <StatusBar style="light" />
+
       {/* ─── Smooth Animated 3-Photo Background Slideshow (100% Screen Adapted) ─── */}
       <Animated.Image
         source={RESORT_BACKGROUNDS[currentBgIndex]}
@@ -103,8 +107,8 @@ export function LoginScreen() {
         style={StyleSheet.absoluteFill}
       />
 
-      {/* Slide Indicators on Top Right */}
-      <View style={styles.bgIndicatorsBox}>
+      {/* Slide Indicators on Top Right (posicionado debajo de la barra de notificaciones) */}
+      <View style={[styles.bgIndicatorsBox, { top: Math.max(insets.top, 16) + 10 }]}>
         {RESORT_BACKGROUNDS.map((_, i) => (
           <View
             key={i}
@@ -116,13 +120,19 @@ export function LoginScreen() {
         ))}
       </View>
 
-      <SafeAreaView style={styles.safeContainer}>
+      <SafeAreaView style={styles.safeContainer} edges={['bottom', 'left', 'right']}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={{ flex: 1 }}
         >
           <ScrollView
-            contentContainerStyle={styles.scrollContent}
+            contentContainerStyle={[
+              styles.scrollContent,
+              {
+                paddingTop: Math.max(insets.top, 20) + 32,
+                paddingBottom: Math.max(insets.bottom, 16) + 24,
+              },
+            ]}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
           >
@@ -259,7 +269,6 @@ const styles = StyleSheet.create({
   },
   bgIndicatorsBox: {
     position: 'absolute',
-    top: Platform.OS === 'ios' ? 50 : 20,
     right: 20,
     flexDirection: 'row',
     gap: 6,

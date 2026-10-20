@@ -224,13 +224,12 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               setIsAuthenticated(true);
               const officerId = parseInt(activeAgente.id.replace(/\D/g, ''), 10);
               cargarReportes(false, !isNaN(officerId) ? officerId : undefined);
+              cargarCatalogo(false);
             }
           } catch {}
         }
       } catch (e) {
         console.warn('Error inicializando contexto:', e);
-      } finally {
-        cargarCatalogo(false);
       }
     };
 
@@ -269,6 +268,9 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       };
       safeStorage.setItem('hoa_mobile_auth', 'true');
       safeStorage.setItem('hoa_mobile_agente', JSON.stringify(agente));
+      if (dbUser.token) {
+        safeStorage.setItem('hoa_mobile_token', dbUser.token);
+      }
       setAgenteActual(agente);
       setIsAuthenticated(true);
       cargarReportes(true, officerNumericId);
@@ -282,6 +284,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     safeStorage.removeItem('hoa_mobile_auth');
     safeStorage.removeItem('hoa_mobile_agente');
     safeStorage.removeItem('hoa_mobile_reportes');
+    safeStorage.removeItem('hoa_mobile_token');
     setIsAuthenticated(false);
     setAgenteActual(DEFAULT_AGENTE);
     setReportes([]);

@@ -198,6 +198,12 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
     ...((options?.headers as any) || {}),
   };
 
+  // Inyectar token de sesión JWT si existe
+  const sessionToken = safeStorage.getItem('hoa_mobile_token');
+  if (sessionToken && !headers['Authorization'] && !headers['authorization']) {
+    headers['Authorization'] = `Bearer ${sessionToken}`;
+  }
+
   // Cabecera condicional para ahorro de Egress
   if (isGet) {
     let cachedEntry = httpEtagCache.get(url);
@@ -473,6 +479,9 @@ export const ApiService = {
 
         const userData = res?.usuario || res?.user || res;
         if (userData && (userData.id_usuario || userData.id)) {
+          if (res?.token) {
+            safeStorage.setItem('hoa_mobile_token', res.token);
+          }
           const id = userData.id_usuario || userData.id;
           const roleName = userData.rolNombre || userData.rol?.nombre || userData.rol || 'Agente de Seguridad';
           const avatarUrl =
