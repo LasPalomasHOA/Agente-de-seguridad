@@ -89,6 +89,7 @@ interface MobileContextType {
   login: (usuario: string, contrasena: string) => Promise<boolean>;
   logout: () => void;
   cargarReportes: (forceRefresh?: boolean, idUsuario?: number) => Promise<void>;
+  refrescarReportesOptimizado: () => Promise<{ hasChanges: boolean; totalCount: number }>;
   cargarCatalogo: (forceRefresh?: boolean) => Promise<void>;
   agregarReporte: (
     nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
@@ -196,6 +197,48 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       console.warn('Error cargando reportes:', err);
     }
   }, []);
+
+  const refrescarReportesOptimizado = useCallback(async (): Promise<{ hasChanges: boolean; totalCount: number }> => {
+    try {
+      const currentAgenteId = agenteActual?.id;
+      const targetUserId = currentAgenteId ? parseInt(currentAgenteId.replace(/\D/g, ''), 10) : undefined;
+      const validUserId = targetUserId && !isNaN(targetUserId) ? targetUserId : undefined;
+
+      const currentList = reportes || [];
+      const currentCount = currentList.length;
+
+      let latestReportId: number | undefined;
+      let latestStatus: string | undefined;
+
+      if (currentList.length > 0) {
+        const topRep = currentList[0];
+        const numId = parseInt((topRep.id || '').replace(/\D/g, ''), 10);
+        if (!isNaN(numId)) {
+          latestReportId = numId;
+        }
+        latestStatus = topRep.estado;
+      }
+
+      // 1. Verificación delta ultraligera (~80 bytes)
+      const delta = await SupabaseService.checkReportesDelta({
+        idUsuario: validUserId,
+        currentCount,
+        latestReportId,
+        latestStatus,
+      });
+
+      if (!delta.hasChanges) {
+        return { hasChanges: false, totalCount: currentCount };
+      }
+
+      // 2. Si se detectaron cambios reales, recargar forzado
+      await cargarReportes(true, validUserId);
+      return { hasChanges: true, totalCount: delta.totalCount };
+    } catch (e) {
+      console.warn('[MobileContext] Error en refrescarReportesOptimizado:', e);
+      return { hasChanges: false, totalCount: reportes?.length || 0 };
+    }
+  }, [cargarReportes, reportes, agenteActual]);
 
   // Inicialización única al montar el componente
   useEffect(() => {
@@ -402,6 +445,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       login,
       logout,
       cargarReportes,
+      refrescarReportesOptimizado,
       cargarCatalogo,
       agregarReporte,
       actualizarReporte,
@@ -417,6 +461,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       login,
       logout,
       cargarReportes,
+      refrescarReportesOptimizado,
       cargarCatalogo,
       agregarReporte,
       actualizarReporte,

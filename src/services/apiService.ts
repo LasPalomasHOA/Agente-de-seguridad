@@ -1510,8 +1510,78 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene la lista de reportes con soporte para límites y filtrado estricto por oficial
+   * Comprobación ultraligera (Delta Ping de ~80 bytes) para verificar si hay reportes nuevos
+   * o si cambió el estatus de revisión sin descargar la lista completa de reportes ni evidencias.
    */
+  async checkReportesDelta(options: {
+    idUsuario?: number;
+    currentCount: number;
+    latestReportId?: number;
+    latestStatus?: string;
+  }): Promise<{ hasChanges: boolean; totalCount: number; latestId?: number; latestStatus?: string }> {
+    const { idUsuario, currentCount, latestReportId, latestStatus } = options;
+
+    if (isSupabaseConfigured()) {
+      try {
+        let query = (supabase as any)
+          .from('reportes_infracciones')
+          .select('id_reporte, estatus_revision', { count: 'exact' })
+          .order('id_reporte', { ascending: false })
+          .limit(1);
+
+        if (idUsuario) {
+          query = query.eq('id_usuario', idUsuario);
+        }
+
+        const { data, count, error } = await query;
+
+        if (!error) {
+          const totalCount = count ?? 0;
+          const latestItem = data && data.length > 0 ? data[0] : null;
+          const dbLatestId = latestItem ? Number(latestItem.id_reporte) : 0;
+          const dbLatestStatus = latestItem ? String(latestItem.estatus_revision || '') : '';
+
+          const hasCountChange = totalCount !== currentCount;
+          const hasIdChange = latestReportId !== undefined && latestReportId > 0 && dbLatestId !== Number(latestReportId);
+          const hasStatusChange = latestStatus !== undefined && dbLatestStatus !== String(latestStatus);
+
+          const hasChanges = hasCountChange || hasIdChange || hasStatusChange;
+
+          return {
+            hasChanges,
+            totalCount,
+            latestId: dbLatestId,
+            latestStatus: dbLatestStatus,
+          };
+        }
+      } catch (err) {
+        console.warn('[ApiService] Error en checkReportesDelta Supabase:', err);
+      }
+    }
+
+    // Fallback ligero con ETag
+    try {
+      const queryParams: string[] = ['limit=1'];
+      if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
+      const data = await fetchJson(`/reportes?${queryParams.join('&')}`);
+      if (Array.isArray(data)) {
+        const latest = data[0];
+        const dbLatestId = latest ? Number(latest.id_reporte) : 0;
+        const dbLatestStatus = latest ? String(latest.estatus_revision || '') : '';
+        const hasIdChange = latestReportId !== undefined && latestReportId > 0 && dbLatestId !== Number(latestReportId);
+        const hasStatusChange = latestStatus !== undefined && dbLatestStatus !== String(latestStatus);
+        return {
+          hasChanges: hasIdChange || hasStatusChange,
+          totalCount: currentCount,
+          latestId: dbLatestId,
+          latestStatus: dbLatestStatus,
+        };
+      }
+    } catch { }
+
+    return { hasChanges: false, totalCount: currentCount };
+  },
+
   /**
    * Obtiene la lista de reportes con soporte para límites y filtrado estricto por oficial
    */

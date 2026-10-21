@@ -9,6 +9,7 @@ import {
   Modal,
   Animated,
   Platform,
+  RefreshControl,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -18,6 +19,8 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { ReporteInfraccion } from '../types/reporte';
 import { Evidencia } from '../types/evidencia';
+import { SocialSyncPill } from '@/components/social-sync-pill';
+import { useSocialRefresh } from '../hooks/use-social-refresh';
 
 const RESORT_SLIDES = [
   require('@/assets/images/resort-1.jpg'),
@@ -49,8 +52,12 @@ const LiveClock = React.memo(() => {
 });
 
 export default function HomeDashboard() {
-  const { agenteActual, reportes } = useMobile();
+  const { agenteActual, reportes, refrescarReportesOptimizado } = useMobile();
   const router = useRouter();
+
+  const { refreshing, syncState, syncMessage, handleRefresh } = useSocialRefresh({
+    onRefreshAction: refrescarReportesOptimizado,
+  });
 
   // Search corbatín
   const [manualCode, setManualCode] = useState('');
@@ -124,7 +131,21 @@ export default function HomeDashboard() {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>
+    <View style={{ flex: 1 }}>
+      <SocialSyncPill state={syncState} message={syncMessage} />
+      <ScrollView
+        contentContainerStyle={styles.scrollContainer}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor="#0D6E5F"
+            colors={['#0D6E5F', '#10B981']}
+            progressBackgroundColor="#ffffff"
+          />
+        }
+      >
       {/* ─── 1. ANIMATED RESORT HERO BANNER WITH REAL OFFICER PROFILE ─── */}
       <View style={styles.heroBannerContainer}>
         <Animated.Image
@@ -416,6 +437,7 @@ export default function HomeDashboard() {
         </Modal>
       )}
     </ScrollView>
+  </View>
   );
 }
 

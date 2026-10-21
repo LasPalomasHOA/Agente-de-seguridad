@@ -20,10 +20,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
 import { ReporteInfraccion } from '../types/reporte';
 import { SupabaseService } from '../services/supabaseService';
+import { SocialSyncPill } from '@/components/social-sync-pill';
+import { useSocialRefresh } from '../hooks/use-social-refresh';
 
 export default function ReportsScreen() {
   const router = useRouter();
-  const { reportes, agenteActual, cargarReportes } = useMobile();
+  const { reportes, agenteActual, refrescarReportesOptimizado } = useMobile();
   const { width } = useWindowDimensions();
 
   // Responsive Breakpoints
@@ -31,14 +33,10 @@ export default function ReportsScreen() {
   const isTablet = width >= 650 && width < 1050;
   const isDesktop = width >= 1050 && width < 1450;
 
-  // Refreshing state
-  const [refreshing, setRefreshing] = useState(false);
-
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await cargarReportes(true);
-    setRefreshing(false);
-  };
+  // Social Refreshing state con protección anti-egress
+  const { refreshing, syncState, syncMessage, handleRefresh } = useSocialRefresh({
+    onRefreshAction: refrescarReportesOptimizado,
+  });
 
   // Filters state
   const [searchFolio, setSearchFolio] = useState('');
@@ -144,18 +142,21 @@ export default function ReportsScreen() {
   };
 
   return (
-    <ScrollView
-      contentContainerStyle={styles.scrollContainer}
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl
-          refreshing={refreshing}
-          onRefresh={onRefresh}
-          colors={['#0D6E5F']}
-          tintColor="#0D6E5F"
-        />
-      }
-    >
+    <View style={{ flex: 1 }}>
+      <SocialSyncPill state={syncState} message={syncMessage} />
+      <ScrollView
+        contentContainerStyle={styles.scrollContainer}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            colors={['#0D6E5F', '#10B981']}
+            tintColor="#0D6E5F"
+            progressBackgroundColor="#ffffff"
+          />
+        }
+      >
       {/* ─── ANIMATED RESORT HEADER ─── */}
       <ResortHeader
         title="Mis Reportes e Infracciones"
@@ -649,6 +650,7 @@ export default function ReportsScreen() {
         </Modal>
       )}
     </ScrollView>
+  </View>
   );
 }
 
