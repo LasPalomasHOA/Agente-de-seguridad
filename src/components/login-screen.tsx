@@ -78,8 +78,8 @@ export function LoginScreen() {
       if (!success) {
         setError('Credenciales no válidas. Verifica con el administrador de seguridad.');
       }
-    } catch {
-      setError('Error al verificar credenciales con el servidor.');
+    } catch (err: any) {
+      setError(err?.message || 'Error al verificar credenciales con el servidor.');
     } finally {
       setLoading(false);
     }

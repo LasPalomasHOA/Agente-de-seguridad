@@ -17,7 +17,7 @@ import { supabase, isSupabaseConfigured, PROJECTIONS, getCountOptimized } from '
 import { uploadEvidenciaASupabase, comprimirImagen } from './imageService';
 
 const resolveApiBaseUrl = (): string => {
-  const envUrl = process.env.EXPO_PUBLIC_API_URL;
+  const envUrl = (process.env.EXPO_PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
   if (Platform.OS === 'web') {
     return envUrl || 'http://localhost:5000/api';
   }
@@ -520,11 +520,14 @@ export const ApiService = {
 
         // Si es un error de conectividad de red
         console.warn('[ApiService] Error de conexión al validar usuario:', loginErr.message);
-        return null;
+        throw new Error(`No se pudo conectar con el servidor (${API_BASE_URL}). Verifica tu conexión.`);
       }
 
       return null;
     } catch (e: any) {
+      if (e?.message?.includes('No se pudo conectar con el servidor')) {
+        throw e;
+      }
       console.warn('[ApiService] Error en login:', e.message);
       return null;
     }
@@ -1000,14 +1003,36 @@ export const ApiService = {
         }
       }
 
+      // Extraer placas y conductor embebidos en el campo 'notas' del corbatín (pases temporales/verdes)
+      let extractedPlacasFromNotas: string | null = null;
+      let extractedConductorFromNotas: string | null = null;
+      if (matchedCorbatin?.notas && typeof matchedCorbatin.notas === 'string') {
+        const placaMatch = matchedCorbatin.notas.match(/placas?:\s*([^|;\n\r]+)/i);
+        if (placaMatch && placaMatch[1]) {
+          extractedPlacasFromNotas = placaMatch[1].trim().toUpperCase();
+        }
+        const condMatch = matchedCorbatin.notas.match(/conductor:\s*([^|;\n\r]+)/i);
+        if (condMatch && condMatch[1]) {
+          extractedConductorFromNotas = condMatch[1].trim();
+        }
+      }
+
+      const resolvedPlacas =
+        matchedVehiculo?.placas ||
+        matchedVehiculo?.placa ||
+        extractedPlacasFromNotas ||
+        'S/P';
+
+      const hasPlacas = resolvedPlacas !== 'S/P' && resolvedPlacas.trim().length > 0;
+
       const vehiculoRow: VehiculoRow = {
         id_vehiculo: matchedVehiculo?.id_vehiculo || 0,
         id_empresa: matchedVehiculo?.id_empresa || 1,
-        marca: matchedVehiculo?.marca || 'Genérica',
-        modelo: matchedVehiculo?.modelo || 'Vehículo',
-        año: matchedVehiculo?.año || matchedVehiculo?.anio || 2024,
-        placas: matchedVehiculo?.placas || matchedVehiculo?.placa || 'SIN-PLACA',
-        color: matchedVehiculo?.color || 'Blanco',
+        marca: matchedVehiculo?.marca || (hasPlacas ? 'Vehículo Acreditado' : (matchedCorbatin ? 'Pase / Corbatín' : 'Genérica')),
+        modelo: matchedVehiculo?.modelo || (hasPlacas ? 'Pase Temporal' : (matchedCorbatin ? 'Sin Auto Asignado' : 'Vehículo')),
+        año: matchedVehiculo?.año || matchedVehiculo?.anio || 2026,
+        placas: resolvedPlacas,
+        color: matchedVehiculo?.color || (hasPlacas ? 'No Especificado' : 'N/A'),
         foto_url: finalFotoUrl || null,
         estatus_acceso: matchedVehiculo?.estatus_acceso || 'HABILITADO',
         created_at: matchedVehiculo?.created_at || new Date().toISOString(),
@@ -1018,10 +1043,13 @@ export const ApiService = {
         matchedVehiculo?.empresa ||
         matchedVehiculo?.empresas || {
           id_empresa: matchedVehiculo?.id_empresa || 1,
-          razon_social: matchedVehiculo?.empresaNombre || 'Constructora y Mantenimiento Residencial',
+          razon_social:
+            matchedCorbatin?.empresa_nombre ||
+            matchedVehiculo?.empresaNombre ||
+            'Constructora y Mantenimiento Residencial',
           responsable_nombre: 'Administración HOA',
-          telefono: '(638) 382-8000',
-          correo: 'contacto@hoa-laspalomas.com',
+          telefono: matchedCorbatin?.telefono || '(638) 382-8000',
+          correo: matchedCorbatin?.email || 'contacto@hoa-laspalomas.com',
           estatus: 'activa',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -1041,17 +1069,35 @@ export const ApiService = {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
+      } else if (extractedConductorFromNotas) {
+        conductorPrincipal = {
+          id_trabajador: 0,
+          id_empresa: empresaRow.id_empresa,
+          nombre: extractedConductorFromNotas,
+          apellidos: '',
+          telefono: matchedCorbatin?.telefono || '(638) 100-2020',
+          foto_url: null,
+          activo: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
       }
+
+      const hasVehicle = Boolean(vehiculoRow.id_vehiculo && Number(vehiculoRow.id_vehiculo) > 0);
 
       // Sanciones, conteo de infracciones y último acceso vehicular en paralelo sin redundancia
       const [todasSanciones, totalInfracciones, ultimoAcceso] = await Promise.all([
         matchedVehiculo?.sanciones && Array.isArray(matchedVehiculo.sanciones)
           ? Promise.resolve(matchedVehiculo.sanciones)
-          : this.getSanciones({ idVehiculo: vehiculoRow.id_vehiculo }),
+          : (hasVehicle
+              ? this.getSanciones({ idVehiculo: Number(vehiculoRow.id_vehiculo) })
+              : Promise.resolve([])),
         typeof matchedVehiculo?.infracciones_count === 'number'
           ? Promise.resolve(matchedVehiculo.infracciones_count)
-          : this.getReportesCount({ idVehiculo: vehiculoRow.id_vehiculo }),
-        this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin),
+          : (hasVehicle
+              ? this.getReportesCount({ idVehiculo: Number(vehiculoRow.id_vehiculo) })
+              : Promise.resolve(0)),
+        hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin) : Promise.resolve(null),
       ]);
 
       const sancionesActivas = (todasSanciones || [])
@@ -1084,6 +1130,12 @@ export const ApiService = {
 
       // Guardar en almacenamiento persistente SOLO la clave canónica principal
       apiCache.set(primaryKey, result);
+
+      if (extractedPlacasFromNotas) {
+        const cleanP = extractedPlacasFromNotas.replace(/[-_ ]/g, '');
+        apiCache.setMemoryOnly(`lookup_plate_${cleanP}`, result);
+        apiCache.setMemoryOnly(`lookup_plate_${extractedPlacasFromNotas}`, result);
+      }
 
       // Los alias y búsquedas secundarias se mapean únicamente en memoria RAM (0ms y 0 I/O bloqueante a disco/localStorage)
       for (const key of aliasKeys) {
@@ -1463,6 +1515,11 @@ export const ApiService = {
   async getReportesCount(options?: { idVehiculo?: number; idUsuario?: number }): Promise<number> {
     const idVehiculo = options?.idVehiculo;
     const idUsuario = options?.idUsuario;
+
+    if (idVehiculo !== undefined && Number(idVehiculo) <= 0 && !idUsuario) {
+      return 0;
+    }
+
     const cacheKey = `reportes_count_${idVehiculo || 'all'}_${idUsuario || 'all'}`;
 
     const cached = apiCache.get<number>(cacheKey, TTL_REPORTES);
@@ -2159,6 +2216,10 @@ export const ApiService = {
     } else if (typeof options === 'object' && options !== null) {
       idVehiculo = options.idVehiculo;
       forceRefresh = options.forceRefresh || false;
+    }
+
+    if (idVehiculo !== undefined && Number(idVehiculo) <= 0) {
+      return [];
     }
 
     const cacheKey = `sanciones_list_${idVehiculo || 'all'}`;
