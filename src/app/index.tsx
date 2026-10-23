@@ -52,7 +52,7 @@ const LiveClock = React.memo(() => {
 });
 
 export default function HomeDashboard() {
-  const { agenteActual, reportes, refrescarReportesOptimizado } = useMobile();
+  const { agenteActual, reportes, refrescarReportesOptimizado, isOnline } = useMobile();
   const router = useRouter();
 
   const { refreshing, syncState, syncMessage, handleRefresh } = useSocialRefresh({
@@ -259,6 +259,14 @@ export default function HomeDashboard() {
               <ThemedText style={styles.manualSearchSubmitBtnText}>Buscar</ThemedText>
             </Pressable>
           </View>
+          {!isOnline && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+              <Ionicons name="cloud-offline" size={13} color="#B45309" style={{ marginRight: 5 }} />
+              <ThemedText style={{ fontSize: 11, color: '#B45309', fontWeight: '600' }}>
+                Modo sin conexión: Búsqueda disponible para vehículos consultados previamente
+              </ThemedText>
+            </View>
+          )}
         </View>
       )}
 

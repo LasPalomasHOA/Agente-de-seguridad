@@ -50,18 +50,46 @@ export const subscribeToPendingCount = (callback: SyncListener) => {
   };
 };
 
+// ─── Estado reactivo de red en tiempo real ───
+type NetworkStateListener = (isConnected: boolean) => void;
+const networkStateListeners = new Set<NetworkStateListener>();
+let lastKnownOnlineState: boolean = true;
+
+const notifyNetworkListeners = (connected: boolean) => {
+  lastKnownOnlineState = connected;
+  networkStateListeners.forEach((listener) => {
+    try {
+      listener(connected);
+    } catch { }
+  });
+};
+
+export const subscribeToNetworkState = (callback: NetworkStateListener) => {
+  networkStateListeners.add(callback);
+  callback(lastKnownOnlineState);
+  return () => {
+    networkStateListeners.delete(callback);
+  };
+};
+
 /**
  * Comprobación ultrarrápida de conectividad a internet sin egress
  */
 export async function isNetworkConnected(): Promise<boolean> {
   try {
     if (Platform.OS === 'web' && typeof navigator !== 'undefined') {
-      return Boolean(navigator.onLine);
+      const online = Boolean(navigator.onLine);
+      lastKnownOnlineState = online;
+      return online;
     }
     const netState = await Network.getNetworkStateAsync();
-    return Boolean(netState.isConnected && (netState.isInternetReachable ?? true));
+    const online = Boolean(netState.isConnected && (netState.isInternetReachable ?? true));
+    lastKnownOnlineState = online;
+    return online;
   } catch {
-    return typeof navigator !== 'undefined' ? Boolean(navigator.onLine) : true;
+    const fallback = typeof navigator !== 'undefined' ? Boolean(navigator.onLine) : true;
+    lastKnownOnlineState = fallback;
+    return fallback;
   }
 }
 
@@ -224,27 +252,54 @@ export async function syncPendingReports(
 }
 
 /**
- * Escucha eventos de restablecimiento de red (Web 'online' y AppState 'active' en móvil)
+ * Escucha eventos de restablecimiento de red (Nativo expo-network, Web 'online' y AppState 'active')
  * SIN INTERVALOS NI BUCLES PERIÓDICOS (0 Egress en reposo).
  */
 export function setupNetworkRestorationListener(onConnectionRestored: () => void): () => void {
   const unsubscribers: Array<() => void> = [];
 
-  // 1. Plataforma Web: evento nativo del navegador
+  // 1. Listener nativo de Expo Network (reactivo en tiempo real)
+  try {
+    if (typeof (Network as any).addNetworkStateListener === 'function') {
+      const netSub = (Network as any).addNetworkStateListener((event: any) => {
+        const isOnline = Boolean(event.isConnected && (event.isInternetReachable ?? true));
+        notifyNetworkListeners(isOnline);
+        if (isOnline) {
+          onConnectionRestored();
+        }
+      });
+      if (netSub && typeof netSub.remove === 'function') {
+        unsubscribers.push(() => netSub.remove());
+      }
+    }
+  } catch (err) {
+    console.warn('[OfflineSync] No se pudo inicializar addNetworkStateListener:', err);
+  }
+
+  // 2. Plataforma Web: evento nativo del navegador
   if (Platform.OS === 'web' && typeof window !== 'undefined') {
     const handleOnline = () => {
       console.info('[OfflineSync] Conexión a internet restablecida en navegador (evento online).');
+      notifyNetworkListeners(true);
       onConnectionRestored();
     };
+    const handleOffline = () => {
+      notifyNetworkListeners(false);
+    };
     window.addEventListener('online', handleOnline);
-    unsubscribers.push(() => window.removeEventListener('online', handleOnline));
+    window.addEventListener('offline', handleOffline);
+    unsubscribers.push(() => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    });
   }
 
-  // 2. Plataforma Móvil: cuando la app vuelve a primer plano
+  // 3. Plataforma Móvil: cuando la app vuelve a primer plano
   let previousState: AppStateStatus = AppState.currentState;
   const appStateSub = AppState.addEventListener('change', async (nextState: AppStateStatus) => {
     if (previousState.match(/inactive|background/) && nextState === 'active') {
       const isOnline = await isNetworkConnected();
+      notifyNetworkListeners(isOnline);
       if (isOnline) {
         onConnectionRestored();
       }
@@ -333,7 +388,7 @@ export async function saveVehicleToOfflineCatalog(result: any): Promise<void> {
         (!record.numero_corbatin || String(item.numero_corbatin) !== String(record.numero_corbatin))
     );
     filtered.unshift(record);
-    const sliced = filtered.slice(0, 400); // Límite de 400 vehículos (~90 KB en disco)
+    const sliced = filtered.slice(0, 400); // Límite de 400 vehículos consultados previamente (~90 KB en disco)
     await AsyncStorage.setItem(OFFLINE_VEHICLES_CATALOG_KEY, JSON.stringify(sliced));
   } catch (err) {
     console.warn('[OfflineCatalog] Error guardando vehículo en catálogo local:', err);
@@ -341,7 +396,7 @@ export async function saveVehicleToOfflineCatalog(result: any): Promise<void> {
 }
 
 /**
- * Lee el catálogo de vehículos offline almacenado en disco
+ * Lee el catálogo de vehículos offline almacenado en disco (exclusivamente los consultados previamente en este dispositivo)
  */
 export async function getOfflineVehiclesCatalog(): Promise<OfflineVehicleRecord[]> {
   try {
@@ -410,7 +465,7 @@ export async function searchOfflineVehicleCatalog(query: string): Promise<any | 
     return formatOfflineRecordAsLookupResult(offlineVehicleMemoryMap.get(`plate_${cleanPlate}`)!);
   }
 
-  // 2. Revisar almacenamiento en disco AsyncStorage
+  // 2. Revisar almacenamiento en disco AsyncStorage (o default seed)
   const catalog = await getOfflineVehiclesCatalog();
   for (const item of catalog) {
     if (item.id_vehiculo) offlineVehicleMemoryMap.set(`veh_${item.id_vehiculo}`, item);
@@ -425,6 +480,7 @@ export async function searchOfflineVehicleCatalog(query: string): Promise<any | 
     if (targetNumber && String(item.numero_corbatin) === targetNumber) return true;
     if (cleanPlate && item.placas.replace(/[-_ ]/g, '') === cleanPlate) return true;
     if (cleanPlate && item.placas.toUpperCase().includes(cleanPlate)) return true;
+    if (cleanPlate && cleanPlate.includes(item.placas.replace(/[-_ ]/g, ''))) return true;
     return false;
   });
 

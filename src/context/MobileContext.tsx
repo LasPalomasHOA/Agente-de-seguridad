@@ -14,6 +14,7 @@ import {
   setupNetworkRestorationListener,
   subscribeToPendingCount,
   isNetworkConnected,
+  subscribeToNetworkState,
   SyncResult,
 } from '../services/offlineSyncService';
 
@@ -101,6 +102,7 @@ interface MobileContextType {
   themeMode: 'light' | 'dark';
   pendingSyncCount: number;
   isSyncingOffline: boolean;
+  isOnline: boolean;
   toggleTheme: () => void;
   login: (usuario: string, contrasena: string) => Promise<boolean>;
   logout: () => void;
@@ -131,6 +133,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>('light');
   const [pendingSyncCount, setPendingSyncCount] = useState<number>(0);
   const [isSyncingOffline, setIsSyncingOffline] = useState<boolean>(false);
+  const [isOnline, setIsOnline] = useState<boolean>(true);
 
   const agenteRef = React.useRef(agenteActual);
   agenteRef.current = agenteActual;
@@ -383,10 +386,15 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     initApp();
   }, [cargarCatalogo, cargarReportes, sincronizarPendientes]);
 
-  // Suscribirse a eventos de reconexión y cambios en cola sin bucles ni intervalos
+  // Suscribirse a eventos de red, reconexión y cambios en cola sin bucles ni intervalos
   useEffect(() => {
+    isNetworkConnected().then(setIsOnline);
+
     const unsubRestoration = setupNetworkRestorationListener(() => {
       sincronizarPendientes();
+    });
+    const unsubNetState = subscribeToNetworkState((connected) => {
+      setIsOnline(connected);
     });
     const unsubCount = subscribeToPendingCount((count) => {
       setPendingSyncCount(count);
@@ -394,6 +402,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     return () => {
       unsubRestoration();
+      unsubNetState();
       unsubCount();
     };
   }, [sincronizarPendientes]);
@@ -582,6 +591,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       themeMode,
       pendingSyncCount,
       isSyncingOffline,
+      isOnline,
       toggleTheme,
       login,
       logout,
@@ -601,6 +611,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       themeMode,
       pendingSyncCount,
       isSyncingOffline,
+      isOnline,
       toggleTheme,
       login,
       logout,

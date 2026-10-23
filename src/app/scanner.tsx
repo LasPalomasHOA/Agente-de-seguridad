@@ -133,7 +133,7 @@ export default function ScannerScreen() {
   const params = useLocalSearchParams();
   const router = useRouter();
   const theme = useTheme();
-  const { agregarReporte, catalogoInfracciones, agenteActual } = useMobile();
+  const { agregarReporte, catalogoInfracciones, agenteActual, isOnline } = useMobile();
 
   // Navigation / Mode states
   const [mode, setMode] = useState<Mode>('camera');
@@ -354,17 +354,24 @@ export default function ScannerScreen() {
     if (lookupInProgress.current) return;
     lookupInProgress.current = true;
 
-    setLoadingText('Consultando base de datos HOA...');
+    const online = await isNetworkConnected();
+    if (!online) {
+      setLoadingText('Consultando memoria local del teléfono...');
+    } else {
+      setLoadingText('Consultando base de datos HOA...');
+    }
     setMode('loading');
     try {
       const res = await SupabaseService.buscarCorbatin(cleanCode);
       if (res && res.vehiculo) {
-        // Si el vehículo no trae foto en memoria, pedirla de forma puntual y cacheada
-        if (!res.vehiculo.foto_url && res.vehiculo.id_vehiculo) {
-          const foto = await SupabaseService.getVehiculoFoto(res.vehiculo.id_vehiculo);
-          if (foto) {
-            res.vehiculo.foto_url = foto;
-          }
+        // Si el vehículo no trae foto en memoria y estamos online, pedirla de forma puntual y cacheada
+        if (!res.vehiculo.foto_url && res.vehiculo.id_vehiculo && online) {
+          try {
+            const foto = await SupabaseService.getVehiculoFoto(res.vehiculo.id_vehiculo);
+            if (foto) {
+              res.vehiculo.foto_url = foto;
+            }
+          } catch { }
         }
 
         setSelectedVehicle(res.vehiculo);
@@ -373,12 +380,11 @@ export default function ScannerScreen() {
         setSelectedConductor(res.conductorPrincipal || null);
         setSancionesActivas(res.sancionesActivas || []);
         setUltimoAcceso(res.ultimoAcceso || null);
-        setIsOfflineScan(Boolean(res.isOfflineData));
+        setIsOfflineScan(Boolean(res.isOfflineData || !online));
         setMode('result');
       } else {
-        const isOnline = await isNetworkConnected();
-        if (!isOnline) {
-          alert(`Modo sin conexión: No se encontró "${cleanCode}" en la memoria del teléfono.\n\nPuedes ingresar las placas manualmente para continuar con la infracción.`);
+        if (!online) {
+          alert(`Modo sin conexión: El corbatín o placa "${cleanCode}" no ha sido consultado previamente en este dispositivo.\n\nPuedes capturar las placas manualmente para continuar con la infracción.`);
         } else {
           alert(`No se encontró vehículo ni corbatín con "${cleanCode}" en la base de datos.`);
         }
@@ -386,9 +392,8 @@ export default function ScannerScreen() {
         setScanned(false);
       }
     } catch (e) {
-      const isOnline = await isNetworkConnected();
-      if (!isOnline) {
-        alert('Sin conexión a internet y el registro no está en la memoria del dispositivo.');
+      if (!online) {
+        alert(`Modo sin conexión: El corbatín o placa "${cleanCode}" no ha sido consultado previamente en este dispositivo.\n\nPuedes capturar las placas manualmente para continuar.`);
       } else {
         alert('Error de conexión con la base de datos.');
       }
@@ -830,9 +835,21 @@ export default function ScannerScreen() {
 
                 {/* Camera Top Controls Bar */}
                 <View style={styles.cameraTopControls}>
-                  <View style={styles.liveBadgePill}>
-                    <View style={styles.liveBlinkingDot} />
-                    <ThemedText style={styles.liveBadgeText}>EN VIVO</ThemedText>
+                  <View style={styles.cameraLeftBadges}>
+                    <View style={styles.liveBadgePill}>
+                      <View style={styles.liveBlinkingDot} />
+                      <ThemedText style={styles.liveBadgeText}>EN VIVO</ThemedText>
+                    </View>
+                    <View style={[styles.cameraNetworkPill, !isOnline && styles.cameraNetworkPillOffline]}>
+                      <Ionicons
+                        name={isOnline ? 'cloud-done' : 'cloud-offline'}
+                        size={12}
+                        color={isOnline ? '#34D399' : '#FBBF24'}
+                      />
+                      <ThemedText style={[styles.cameraNetworkPillText, !isOnline && styles.cameraNetworkPillTextOffline]}>
+                        {isOnline ? 'En Línea' : 'Offline (Local)'}
+                      </ThemedText>
+                    </View>
                   </View>
 
                   <View style={styles.cameraActionsRow}>
@@ -913,6 +930,14 @@ export default function ScannerScreen() {
                 </ThemedText>
               </Pressable>
             </View>
+            {!isOnline && (
+              <View style={styles.manualOfflineHint}>
+                <Ionicons name="information-circle-outline" size={14} color="#B45309" style={{ marginRight: 6 }} />
+                <ThemedText style={styles.manualOfflineHintText}>
+                  Modo offline activo: Solo coincidirán vehículos consultados previamente en este teléfono.
+                </ThemedText>
+              </View>
+            )}
           </View>
         </ScrollView>
       )}
@@ -2155,6 +2180,50 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     zIndex: 10,
+  },
+  cameraLeftBadges: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  cameraNetworkPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(52, 211, 153, 0.4)',
+  },
+  cameraNetworkPillOffline: {
+    borderColor: 'rgba(245, 158, 11, 0.5)',
+  },
+  cameraNetworkPillText: {
+    color: '#34D399',
+    fontSize: 9.5,
+    fontWeight: '800',
+  },
+  cameraNetworkPillTextOffline: {
+    color: '#FBBF24',
+  },
+  manualOfflineHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  manualOfflineHintText: {
+    fontSize: 11,
+    color: '#92400E',
+    fontWeight: '600',
+    flex: 1,
   },
   liveBadgePill: {
     flexDirection: 'row',

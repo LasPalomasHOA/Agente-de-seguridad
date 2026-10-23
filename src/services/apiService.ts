@@ -15,7 +15,7 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { supabase, isSupabaseConfigured, PROJECTIONS, getCountOptimized } from '../lib/supabase';
 import { uploadEvidenciaASupabase, comprimirImagen } from './imageService';
-import { searchOfflineVehicleCatalog, saveVehicleToOfflineCatalog } from './offlineSyncService';
+import { searchOfflineVehicleCatalog, saveVehicleToOfflineCatalog, isNetworkConnected } from './offlineSyncService';
 
 const resolveApiBaseUrl = (): string => {
   const envUrl = (process.env.EXPO_PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
@@ -227,10 +227,17 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
     }
   }
 
+  // Usar AbortController con timeout de 3500ms para evitar que la app quede congelada ante red lenta o desconexión
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    try { controller.abort(); } catch { }
+  }, 3500);
+
   try {
     const res = await fetch(url, {
       ...options,
       headers,
+      signal: options?.signal || controller.signal,
     });
 
     // 304 Not Modified: datos intactos, devolver caché local sin consumir ancho de banda
@@ -268,11 +275,13 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
 
     return data;
   } catch (err: any) {
-    // Reducir ruido de logs en consola cuando es fallback esperado
-    if (!err.message?.includes('Failed to fetch') && !err.message?.includes('Network request failed')) {
+    // Reducir ruido de logs en consola cuando es fallback esperado o timeout abort
+    if (!err.message?.includes('Failed to fetch') && !err.message?.includes('Network request failed') && !err.name?.includes('AbortError')) {
       console.warn(`[ApiService] Solicitud a ${url}:`, err.message);
     }
     throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 
@@ -803,6 +812,13 @@ export const ApiService = {
     try {
       const cleanParam = (param || '').trim();
       if (!cleanParam) return null;
+
+      // 0. FAST PATH OFFLINE: Si el dispositivo está sin red, ir directo a la memoria local sin esperar timeouts
+      const isOnline = await isNetworkConnected();
+      if (!isOnline) {
+        const offlineMatch = await searchOfflineVehicleCatalog(cleanParam);
+        return offlineMatch;
+      }
 
       // 1. Revisar si la consulta ya está en caché reciente bajo su clave canónica o algún alias
       const { primaryKey, aliasKeys, numbers, plates } = this.getCanonicalLookupKeys(cleanParam);

@@ -123,7 +123,7 @@ const FAQS_OPERATIVAS: FAQItem[] = [
     categoria: 'sistema',
     tag: 'Sin Internet',
     q: '¿Puedo usar la aplicación si hay baja señal o falla el internet en caseta?',
-    a: 'Sí. La aplicación almacena en su memoria local las normativas y datos recientes. Los reportes e ingresos quedan registrados en el dispositivo y se sincronizan con la base de datos central en cuanto se restablece la conexión de red.',
+    a: 'Sí, la aplicación cuenta con soporte offline completo:\n• Corbatines guardados: Podrás consultar o escanear cualquier corbatín que haya sido consultado con anterioridad en este teléfono mientras había red.\n• Generación de infracciones: Puedes levantar reportes, capturar fotografías y redactar hechos sin conexión.\n• Cola de subida automática: Los reportes se marcan con una insignia ámbar de "Pendiente de sincronizar" y se suben al servidor automáticamente en cuanto el teléfono recupera red.',
   },
   {
     id: 14,
@@ -138,6 +138,13 @@ const FAQS_OPERATIVAS: FAQItem[] = [
     tag: 'Cierre de Turno',
     q: '¿Qué debo verificar antes de concluir mi turno de servicio?',
     a: '1. Verifique en la pestaña "Reportes" que todos sus folios del día hayan sido enviados correctamente (sin borradores pendientes).\n2. Asegúrese de que todos los accesos denegados o forzados quedaron debidamente asentados en bitácora.\n3. Cierre sesión en la app desde el apartado "Perfil" para el siguiente oficial de guardia.',
+  },
+  {
+    id: 16,
+    categoria: 'acceso',
+    tag: 'Modo Offline',
+    q: '¿Cómo funciona la búsqueda y escaneo de corbatines cuando no hay internet?',
+    a: '1. Guardado de consultas previas: Cada vez que un oficial consulta o escanea un corbatín estando conectado a internet, la ficha del vehículo y su empresa se guarda automáticamente en la memoria local de este teléfono.\n2. Búsqueda sin conexión: Si no tienes internet y buscas o escaneas un corbatín que ya fue consultado antes en este dispositivo, cargará inmediatamente desde la memoria local.\n3. Vehículo nunca consultado en este teléfono: Si el corbatín nunca ha sido buscado en este teléfono y no hay internet, el sistema te notificará que no se encuentra en la memoria local. En este caso, puedes levantar la infracción escribiendo las placas del vehículo manualmente.\n4. Sincronización automática: Al recuperar la señal, los reportes levantados se suben solos a la base de datos sin requerir activación manual.',
   },
 ];
 

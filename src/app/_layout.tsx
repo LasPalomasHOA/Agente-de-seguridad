@@ -24,7 +24,7 @@ import { Ionicons } from '@expo/vector-icons';
 SplashScreen.preventAutoHideAsync();
 
 function DashboardShell() {
-  const { isAuthenticated, logout, agenteActual } = useMobile();
+  const { isAuthenticated, logout, agenteActual, isOnline } = useMobile();
   const router = useRouter();
   const pathname = usePathname();
   const { width } = useWindowDimensions();
@@ -86,7 +86,7 @@ function DashboardShell() {
                 style={styles.officerPhotoAvatar}
                 cachePolicy="memory-disk"
               />
-              <View style={styles.onlineBadgeDot} />
+              <View style={[styles.onlineBadgeDot, !isOnline && { backgroundColor: '#F59E0B' }]} />
             </View>
             <View style={styles.officerTextCol}>
               <ThemedText style={styles.officerNameText} numberOfLines={1}>
@@ -149,8 +149,10 @@ function DashboardShell() {
           {/* Bottom Sidebar Box */}
           <View style={styles.sidebarBottomBox}>
             <View style={styles.systemStatusLine}>
-              <View style={styles.systemStatusDot} />
-              <ThemedText style={styles.systemStatusText}>En Línea &bull; v2.4.1</ThemedText>
+              <View style={[styles.systemStatusDot, !isOnline && { backgroundColor: '#F59E0B' }]} />
+              <ThemedText style={styles.systemStatusText}>
+                {isOnline ? 'En Línea • v2.4.1' : 'Modo Offline (Local)'}
+              </ThemedText>
             </View>
             <Pressable
               onPress={logout}
@@ -180,8 +182,20 @@ function DashboardShell() {
             </View>
 
             <View style={styles.mobileTopRight}>
+              {/* Online / Offline Status Pill */}
+              <View style={[styles.networkStatusPill, !isOnline && styles.networkStatusPillOffline]}>
+                <Ionicons
+                  name={isOnline ? 'cellular' : 'cloud-offline'}
+                  size={12}
+                  color={isOnline ? '#0D6E5F' : '#D97706'}
+                />
+                <ThemedText style={[styles.networkStatusText, !isOnline && styles.networkStatusTextOffline]}>
+                  {isOnline ? 'En línea' : 'Sin red'}
+                </ThemedText>
+              </View>
+
               <View style={styles.officerDutyPill}>
-                <View style={styles.liveDot} />
+                <View style={[styles.liveDot, !isOnline && styles.liveDotOffline]} />
                 <ThemedText style={styles.officerDutyText}>
                   {getShortName(agenteActual?.nombre)}
                 </ThemedText>
@@ -196,6 +210,26 @@ function DashboardShell() {
                 <Ionicons name="log-out-outline" size={18} color="#DC2626" />
               </Pressable>
             </View>
+          </View>
+        )}
+
+        {/* Global Offline Bar (< 768px) */}
+        {!isDesktop && !isOnline && (
+          <View style={styles.globalOfflineBanner}>
+            <Ionicons name="cloud-offline" size={13} color="#92400E" style={{ marginRight: 6 }} />
+            <ThemedText style={styles.globalOfflineBannerText} numberOfLines={1}>
+              Modo sin red activo &bull; Consultas y reportes en memoria local
+            </ThemedText>
+          </View>
+        )}
+
+        {/* Global Offline Bar (Desktop >= 768px) */}
+        {isDesktop && !isOnline && (
+          <View style={styles.globalOfflineBanner}>
+            <Ionicons name="cloud-offline" size={14} color="#92400E" style={{ marginRight: 8 }} />
+            <ThemedText style={styles.globalOfflineBannerText}>
+              Modo sin conexión a internet &bull; Guardando infracciones y consultando en memoria local
+            </ThemedText>
           </View>
         )}
 
@@ -537,6 +571,47 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: '#10B981',
+  },
+  liveDotOffline: {
+    backgroundColor: '#F59E0B',
+  },
+  networkStatusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4.5,
+    borderRadius: 8,
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+  },
+  networkStatusPillOffline: {
+    backgroundColor: '#FEF3C7',
+    borderColor: '#FDE68A',
+  },
+  networkStatusText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0D6E5F',
+  },
+  networkStatusTextOffline: {
+    color: '#B45309',
+  },
+  globalOfflineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FEF3C7',
+    borderBottomWidth: 1,
+    borderBottomColor: '#FDE68A',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  globalOfflineBannerText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#92400E',
   },
   officerDutyText: {
     fontSize: 11.5,
