@@ -25,7 +25,7 @@ import { useSocialRefresh } from '../hooks/use-social-refresh';
 
 export default function ReportsScreen() {
   const router = useRouter();
-  const { reportes, agenteActual, refrescarReportesOptimizado } = useMobile();
+  const { reportes, agenteActual, refrescarReportesOptimizado, pendingSyncCount, sincronizarPendientes, isSyncingOffline } = useMobile();
   const { width } = useWindowDimensions();
 
   // Responsive Breakpoints
@@ -174,6 +174,40 @@ export default function ReportsScreen() {
           </Pressable>
         }
       />
+
+      {/* ─── BANNER DE REPORTES PENDIENTES OFFLINE ─── */}
+      {pendingSyncCount > 0 && (
+        <View style={styles.offlineBanner}>
+          <View style={styles.offlineBannerLeft}>
+            <Ionicons name="cloud-offline" size={20} color="#B45309" />
+            <View style={{ flex: 1 }}>
+              <ThemedText style={styles.offlineBannerTitle}>
+                {pendingSyncCount === 1 ? '1 reporte guardado sin conexión' : `${pendingSyncCount} reportes guardados sin conexión`}
+              </ThemedText>
+              <ThemedText style={styles.offlineBannerSub}>
+                Se subirán automáticamente al recuperar internet o puedes enviarlos ahora.
+              </ThemedText>
+            </View>
+          </View>
+          <Pressable
+            onPress={sincronizarPendientes}
+            disabled={isSyncingOffline}
+            style={({ pressed }) => [
+              styles.offlineSyncBtn,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            {isSyncingOffline ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <>
+                <Ionicons name="cloud-upload" size={14} color="#FFFFFF" style={{ marginRight: 4 }} />
+                <ThemedText style={styles.offlineSyncBtnText}>Subir ahora</ThemedText>
+              </>
+            )}
+          </Pressable>
+        </View>
+      )}
 
       {/* ─── METRICS & STATUS SUMMARY BAR ─── */}
       <View style={styles.metricsSummaryRow}>
@@ -348,14 +382,17 @@ export default function ReportsScreen() {
             const isAprobado = rep.estado === 'aprobado';
             const isRechazado = rep.estado === 'rechazado';
             const isBorrador = rep.estado === 'borrador';
+            const isOfflinePending = Boolean(rep.isOfflinePending);
 
-            const leftColor = isAprobado
-              ? '#10B981'
-              : isRechazado
-                ? '#EF4444'
-                : isBorrador
-                  ? '#94A3B8'
-                  : '#F59E0B';
+            const leftColor = isOfflinePending
+              ? '#D97706'
+              : isAprobado
+                ? '#10B981'
+                : isRechazado
+                  ? '#EF4444'
+                  : isBorrador
+                    ? '#94A3B8'
+                    : '#F59E0B';
 
             return (
               <Pressable
@@ -375,24 +412,26 @@ export default function ReportsScreen() {
                     <ThemedText style={styles.cardFolioTitle}>{rep.folio}</ThemedText>
                   </View>
 
-                  {isAprobado && (
+                  {isOfflinePending ? (
+                    <View style={styles.badgeOffline}>
+                      <Ionicons name="cloud-offline" size={11} color="#B45309" />
+                      <ThemedText style={styles.badgeOfflineText}>Pendiente de subir</ThemedText>
+                    </View>
+                  ) : isAprobado ? (
                     <View style={styles.badgeAprobado}>
                       <View style={styles.dotGreen} />
                       <ThemedText style={styles.badgeAprobadoText}>Aprobado</ThemedText>
                     </View>
-                  )}
-                  {isRechazado && (
+                  ) : isRechazado ? (
                     <View style={styles.badgeRechazado}>
                       <View style={styles.dotRed} />
                       <ThemedText style={styles.badgeRechazadoText}>Rechazado</ThemedText>
                     </View>
-                  )}
-                  {isBorrador && (
+                  ) : isBorrador ? (
                     <View style={styles.badgeBorrador}>
                       <ThemedText style={styles.badgeBorradorText}>Borrador</ThemedText>
                     </View>
-                  )}
-                  {!isAprobado && !isRechazado && !isBorrador && (
+                  ) : (
                     <View style={styles.badgePendiente}>
                       <View style={styles.dotOrange} />
                       <ThemedText style={styles.badgePendienteText}>Pendiente</ThemedText>
@@ -823,6 +862,63 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     color: '#0f172a',
     letterSpacing: -0.2,
+  },
+  badgeOffline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 7,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  badgeOfflineText: {
+    color: '#B45309',
+    fontSize: 10.5,
+    fontWeight: '800',
+  },
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1.5,
+    borderColor: '#FDE68A',
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 14,
+    gap: 12,
+  },
+  offlineBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  offlineBannerTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#92400E',
+  },
+  offlineBannerSub: {
+    fontSize: 11,
+    color: '#B45309',
+    marginTop: 1,
+  },
+  offlineSyncBtn: {
+    backgroundColor: '#D97706',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 9,
+  },
+  offlineSyncBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
   },
   badgePendiente: {
     flexDirection: 'row',

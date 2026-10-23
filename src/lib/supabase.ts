@@ -9,6 +9,8 @@ export const SUPABASE_URL =
 export const SUPABASE_ANON_KEY =
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'TU_ANON_KEY_AQUI';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 // Storage adapter safe across Web, iOS, Android
 const customStorage = {
   getItem: async (key: string): Promise<string | null> => {
@@ -16,7 +18,7 @@ const customStorage = {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         return window.localStorage.getItem(key);
       }
-      return null;
+      return await AsyncStorage.getItem(key);
     } catch {
       return null;
     }
@@ -26,6 +28,7 @@ const customStorage = {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         window.localStorage.setItem(key, value);
       }
+      await AsyncStorage.setItem(key, value);
     } catch { }
   },
   removeItem: async (key: string): Promise<void> => {
@@ -33,6 +36,7 @@ const customStorage = {
       if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
         window.localStorage.removeItem(key);
       }
+      await AsyncStorage.removeItem(key);
     } catch { }
   },
 };

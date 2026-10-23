@@ -15,6 +15,7 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { supabase, isSupabaseConfigured, PROJECTIONS, getCountOptimized } from '../lib/supabase';
 import { uploadEvidenciaASupabase, comprimirImagen } from './imageService';
+import { searchOfflineVehicleCatalog, saveVehicleToOfflineCatalog } from './offlineSyncService';
 
 const resolveApiBaseUrl = (): string => {
   const envUrl = (process.env.EXPO_PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
@@ -52,7 +53,10 @@ export interface CorbatinLookupResult {
   sancionesActivas: SancionDbRow[];
   totalInfracciones: number;
   ultimoAcceso?: BitacoraAccesoRow | null;
+  isOfflineData?: boolean;
 }
+
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Almacenamiento seguro y persistente para caché entre sesiones y recargas
 const memoryStorageMap = new Map<string, string>();
@@ -73,6 +77,7 @@ export const safeStorage = {
       }
     } catch { }
     memoryStorageMap.set(key, value);
+    AsyncStorage.setItem(key, value).catch(() => {});
   },
   removeItem: (key: string): void => {
     try {
@@ -81,6 +86,7 @@ export const safeStorage = {
       }
     } catch { }
     memoryStorageMap.delete(key);
+    AsyncStorage.removeItem(key).catch(() => {});
   },
 };
 
@@ -804,23 +810,26 @@ export const ApiService = {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
         if (cachedResult && cachedResult.vehiculo && Number(cachedResult.vehiculo.id_vehiculo) > 0) {
           // Consultar en vivo el último acceso y las sanciones activas (respetando TTL_SANCIONES de 30s)
-          const [liveAcceso, liveSanciones] = await Promise.all([
-            this.getUltimoAcceso(
-              cachedResult.vehiculo.id_vehiculo,
-              cachedResult.corbatin?.id_corbatin
-            ),
-            this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: false }),
-          ]);
+          try {
+            const [liveAcceso, liveSanciones] = await Promise.all([
+              this.getUltimoAcceso(
+                cachedResult.vehiculo.id_vehiculo,
+                cachedResult.corbatin?.id_corbatin
+              ).catch(() => null),
+              this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: false }).catch(() => []),
+            ]);
 
-          cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
-          // Si en la web se aprobó una infracción, aquí se reflejará de inmediato:
-          if (Array.isArray(liveSanciones)) {
-            cachedResult.sancionesActivas = liveSanciones
-              .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo')
-              .map((s: any) => ({
-                ...s,
-                estatus: (s.estatus?.toLowerCase() as any) || 'activa',
-              }));
+            cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
+            if (Array.isArray(liveSanciones)) {
+              cachedResult.sancionesActivas = liveSanciones
+                .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo')
+                .map((s: any) => ({
+                  ...s,
+                  estatus: (s.estatus?.toLowerCase() as any) || 'activa',
+                }));
+            }
+          } catch {
+            cachedResult.isOfflineData = true;
           }
 
           return cachedResult;
@@ -968,8 +977,14 @@ export const ApiService = {
         }
       }
 
-      // Si no se encontró ningún registro coincidente, retornar null sin consumir más red
+      // Si no se encontró ningún registro remoto coincidente, revisar catálogo offline local antes de desistir
       if (!matchedCorbatin && !matchedVehiculo) {
+        try {
+          const offlineMatch = await searchOfflineVehicleCatalog(cleanParam);
+          if (offlineMatch) {
+            return offlineMatch;
+          }
+        } catch { }
         return null;
       }
 
@@ -1155,9 +1170,19 @@ export const ApiService = {
         apiCache.setMemoryOnly(`lookup_plate_${vehiculoRow.placas.toUpperCase()}`, result);
       }
 
+      // Guardar vehículo en el catálogo local offline para futuros escaneos sin internet (0 bytes Egress extra)
+      saveVehicleToOfflineCatalog(result).catch(() => {});
+
       return result;
     } catch (e) {
-      console.warn('[ApiService] Error en buscarCorbatin:', e);
+      console.warn('[ApiService] Error en buscarCorbatin, consultando catálogo offline local:', e);
+      try {
+        const clean = (param || '').trim();
+        const offlineMatch = await searchOfflineVehicleCatalog(clean);
+        if (offlineMatch) {
+          return offlineMatch;
+        }
+      } catch { }
       return null;
     }
   },

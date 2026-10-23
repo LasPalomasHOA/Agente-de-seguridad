@@ -1,9 +1,21 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Agente } from '../types/agente';
 import { ReporteInfraccion } from '../types/reporte';
 import { CatalogoInfraccionRow, ReglamentoRow } from '../types/database';
 import { SupabaseService } from '../services/supabaseService';
+import {
+  queueReportForSync,
+  getPendingReports,
+  saveCachedReports,
+  getCachedReports,
+  syncPendingReports,
+  setupNetworkRestorationListener,
+  subscribeToPendingCount,
+  isNetworkConnected,
+  SyncResult,
+} from '../services/offlineSyncService';
 
 const memoryStorageMap = new Map<string, string>();
 
@@ -23,6 +35,7 @@ const safeStorage = {
       }
     } catch {}
     memoryStorageMap.set(key, value);
+    AsyncStorage.setItem(key, value).catch(() => {});
   },
   removeItem: (key: string): void => {
     try {
@@ -31,6 +44,7 @@ const safeStorage = {
       }
     } catch {}
     memoryStorageMap.delete(key);
+    AsyncStorage.removeItem(key).catch(() => {});
   },
 };
 
@@ -85,11 +99,14 @@ interface MobileContextType {
   catalogoInfracciones: CatalogoInfraccionRow[];
   reglamentos: ReglamentoRow[];
   themeMode: 'light' | 'dark';
+  pendingSyncCount: number;
+  isSyncingOffline: boolean;
   toggleTheme: () => void;
   login: (usuario: string, contrasena: string) => Promise<boolean>;
   logout: () => void;
   cargarReportes: (forceRefresh?: boolean, idUsuario?: number) => Promise<void>;
   refrescarReportesOptimizado: () => Promise<{ hasChanges: boolean; totalCount: number }>;
+  sincronizarPendientes: () => Promise<SyncResult>;
   cargarCatalogo: (forceRefresh?: boolean) => Promise<void>;
   agregarReporte: (
     nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
@@ -112,6 +129,8 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [catalogoInfracciones, setCatalogoInfracciones] = useState<CatalogoInfraccionRow[]>([]);
   const [reglamentos, setReglamentos] = useState<ReglamentoRow[]>([]);
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>('light');
+  const [pendingSyncCount, setPendingSyncCount] = useState<number>(0);
+  const [isSyncingOffline, setIsSyncingOffline] = useState<boolean>(false);
 
   const agenteRef = React.useRef(agenteActual);
   agenteRef.current = agenteActual;
@@ -136,12 +155,23 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         ? idUsuario
         : (currentAgenteId ? parseInt(currentAgenteId.replace(/\D/g, ''), 10) : undefined);
 
-      // Se elimina SupabaseService.getCorbatines() en paralelo (ahorro de 50 filas por carga)
-      const dbReportes = await SupabaseService.getReportes({
-        idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
-        limit: 30,
-        forceRefresh,
-      });
+      const [dbReportes, pendingOffline] = await Promise.all([
+        SupabaseService.getReportes({
+          idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
+          limit: 30,
+          forceRefresh,
+        }).catch(() => null),
+        getPendingReports(),
+      ]);
+
+      setPendingSyncCount(pendingOffline.length);
+
+      const pendingReportObjects: ReporteInfraccion[] = pendingOffline
+        .filter((p) => !targetUserId || Number(p.params.idUsuario) === targetUserId)
+        .map((p) => ({
+          ...p.reporteCompleto,
+          isOfflinePending: true,
+        }));
 
       if (dbReportes && dbReportes.length > 0) {
         const mapped: ReporteInfraccion[] = dbReportes.map((r: any) => {
@@ -180,6 +210,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             observaciones: r.ubicacion_texto,
             agenteId: String(r.id_usuario),
             estado,
+            isOfflinePending: false,
             evidencias: (r.evidencias || []).map((ev: any, idx: number) => ({
               id: `ev_${ev.id_evidencia || idx}`,
               fotoUrl: ev.archivo,
@@ -190,16 +221,71 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             historial: [],
           };
         });
-        setReportes(mapped);
+
+        // Fusión protegida: reportes offline pendientes van al inicio y no son eliminados
+        const combined = [...pendingReportObjects, ...mapped];
+        setReportes(combined);
+        await saveCachedReports(combined);
+        return;
+      } else if (pendingReportObjects.length > 0) {
+        setReportes(pendingReportObjects);
         return;
       }
     } catch (err) {
-      console.warn('Error cargando reportes:', err);
+      console.warn('[MobileContext] Error cargando reportes remotos, recurriendo a caché local:', err);
+      // Fallback a almacenamiento offline en disco
+      const [cached, pendingOffline] = await Promise.all([
+        getCachedReports(),
+        getPendingReports(),
+      ]);
+      const pendingObjects = pendingOffline.map((p) => ({ ...p.reporteCompleto, isOfflinePending: true }));
+      const combined = [...pendingObjects, ...cached.filter((c) => !pendingObjects.some((p) => p.id === c.id))];
+      if (combined.length > 0) {
+        setReportes(combined);
+      }
+    }
+  }, []);
+
+  const sincronizarPendientes = useCallback(async (): Promise<SyncResult> => {
+    setIsSyncingOffline(true);
+    try {
+      const res = await syncPendingReports(
+        async (pendingItem) => {
+          return await SupabaseService.crearReporteInfraccion(pendingItem.params);
+        },
+        async (tempId, realId, realFolio) => {
+          setReportes((prev) => {
+            const updated = prev.map((r) => {
+              if (r.id === tempId) {
+                return {
+                  ...r,
+                  id: `rep_${realId}`,
+                  folio: realFolio,
+                  isOfflinePending: false,
+                };
+              }
+              return r;
+            });
+            saveCachedReports(updated);
+            return updated;
+          });
+        }
+      );
+
+      const pending = await getPendingReports();
+      setPendingSyncCount(pending.length);
+      return res;
+    } finally {
+      setIsSyncingOffline(false);
     }
   }, []);
 
   const refrescarReportesOptimizado = useCallback(async (): Promise<{ hasChanges: boolean; totalCount: number }> => {
     try {
+      // 1. Sincronizar reportes pendientes offline si hay conexión (Egress 0 si no hay pendientes)
+      const syncResult = await sincronizarPendientes();
+      const hadOfflineSync = syncResult.syncedCount > 0;
+
       const currentAgenteId = agenteActual?.id;
       const targetUserId = currentAgenteId ? parseInt(currentAgenteId.replace(/\D/g, ''), 10) : undefined;
       const validUserId = targetUserId && !isNaN(targetUserId) ? targetUserId : undefined;
@@ -211,15 +297,17 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       let latestStatus: string | undefined;
 
       if (currentList.length > 0) {
-        const topRep = currentList[0];
-        const numId = parseInt((topRep.id || '').replace(/\D/g, ''), 10);
-        if (!isNaN(numId)) {
-          latestReportId = numId;
+        const topRep = currentList.find((r) => !r.isOfflinePending);
+        if (topRep) {
+          const numId = parseInt((topRep.id || '').replace(/\D/g, ''), 10);
+          if (!isNaN(numId)) {
+            latestReportId = numId;
+          }
+          latestStatus = topRep.estado;
         }
-        latestStatus = topRep.estado;
       }
 
-      // 1. Verificación delta ultraligera (~80 bytes)
+      // 2. Verificación delta ultraligera (~80 bytes)
       const delta = await SupabaseService.checkReportesDelta({
         idUsuario: validUserId,
         currentCount,
@@ -227,29 +315,42 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         latestStatus,
       });
 
-      if (!delta.hasChanges) {
+      if (!delta.hasChanges && !hadOfflineSync) {
         return { hasChanges: false, totalCount: currentCount };
       }
 
-      // 2. Si se detectaron cambios reales, recargar forzado
+      // 3. Si se detectaron cambios reales o se subieron reportes offline, recargar
       await cargarReportes(true, validUserId);
       return { hasChanges: true, totalCount: delta.totalCount };
     } catch (e) {
       console.warn('[MobileContext] Error en refrescarReportesOptimizado:', e);
       return { hasChanges: false, totalCount: reportes?.length || 0 };
     }
-  }, [cargarReportes, reportes, agenteActual]);
+  }, [sincronizarPendientes, agenteActual, reportes, cargarReportes]);
 
   // Inicialización única al montar el componente
   useEffect(() => {
     const initApp = async () => {
       try {
-        const localAuth = safeStorage.getItem('hoa_mobile_auth');
-        const localAgente = safeStorage.getItem('hoa_mobile_agente');
-        const localTheme = safeStorage.getItem('hoa_mobile_theme');
+        const [localAuth, localAgente, localTheme, cachedList, pendingOffline] = await Promise.all([
+          AsyncStorage.getItem('hoa_mobile_auth').catch(() => safeStorage.getItem('hoa_mobile_auth')),
+          AsyncStorage.getItem('hoa_mobile_agente').catch(() => safeStorage.getItem('hoa_mobile_agente')),
+          AsyncStorage.getItem('hoa_mobile_theme').catch(() => safeStorage.getItem('hoa_mobile_theme')),
+          getCachedReports().catch(() => []),
+          getPendingReports().catch(() => []),
+        ]);
+
+        if (pendingOffline && pendingOffline.length > 0) {
+          setPendingSyncCount(pendingOffline.length);
+        }
 
         if (localTheme === 'light' || localTheme === 'dark') {
           setThemeMode(localTheme);
+        }
+
+        // Carga inmediata de la UI con caché local (0ms de latencia, 0 bytes de red)
+        if (cachedList && cachedList.length > 0) {
+          setReportes(cachedList);
         }
 
         if (localAuth === 'true' && localAgente) {
@@ -268,6 +369,9 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               const officerId = parseInt(activeAgente.id.replace(/\D/g, ''), 10);
               cargarReportes(false, !isNaN(officerId) ? officerId : undefined);
               cargarCatalogo(false);
+
+              // Sincronizar pendientes si hay conexión (una sola vez al montar)
+              sincronizarPendientes();
             }
           } catch {}
         }
@@ -277,12 +381,22 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
 
     initApp();
-  }, [cargarCatalogo, cargarReportes]);
+  }, [cargarCatalogo, cargarReportes, sincronizarPendientes]);
 
-  const saveReportes = useCallback((newReportes: ReporteInfraccion[]) => {
-    setReportes(newReportes);
-    safeStorage.setItem('hoa_mobile_reportes', JSON.stringify(newReportes));
-  }, []);
+  // Suscribirse a eventos de reconexión y cambios en cola sin bucles ni intervalos
+  useEffect(() => {
+    const unsubRestoration = setupNetworkRestorationListener(() => {
+      sincronizarPendientes();
+    });
+    const unsubCount = subscribeToPendingCount((count) => {
+      setPendingSyncCount(count);
+    });
+
+    return () => {
+      unsubRestoration();
+      unsubCount();
+    };
+  }, [sincronizarPendientes]);
 
   const toggleTheme = useCallback(() => {
     setThemeMode((prev) => {
@@ -318,10 +432,11 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setIsAuthenticated(true);
       cargarReportes(true, officerNumericId);
       cargarCatalogo(false);
+      sincronizarPendientes();
       return true;
     }
     return false;
-  }, [cargarReportes, cargarCatalogo]);
+  }, [cargarReportes, cargarCatalogo, sincronizarPendientes]);
 
   const logout = useCallback(() => {
     safeStorage.removeItem('hoa_mobile_auth');
@@ -344,81 +459,105 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   ): Promise<string> => {
     const now = new Date();
     const folioNum = Math.floor(1000 + Math.random() * 9000);
-    const folioStr = `F-2026-${folioNum}`;
     const dateStr = now.toISOString().split('T')[0];
     const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
 
-    let dbReporteId: number | null = null;
-
-    // Guardar en la base de datos Supabase / API Express
-    try {
-      let vehIdNum = nuevo.idVehiculo;
-      if (!vehIdNum) {
-        vehIdNum = parseInt(nuevo.vehiculoId.replace(/\D/g, '') || '1', 10);
-      }
-
-      let corbIdNum = nuevo.idCorbatin;
-      if (corbIdNum === undefined) {
-        corbIdNum = null;
-      }
-
-      let infIdNum = nuevo.idInfraccion;
-      const catalogo = catalogoInfracciones.length > 0 ? catalogoInfracciones : await SupabaseService.getCatalogoInfracciones();
-      const validExists = catalogo.some((c) => Number(c.id_infraccion) === Number(infIdNum));
-
-      if (!infIdNum || !validExists) {
-        const found =
-          catalogo.find((c) => (c.codigo || '').toLowerCase() === (nuevo.infraccionCodigo || '').toLowerCase()) ||
-          catalogo.find((c) => (c.categoria || '').toLowerCase().includes('general') || (c.nombre || '').toLowerCase().includes('otro')) ||
-          catalogo[0];
-        infIdNum = found ? Number(found.id_infraccion) : 1;
-      }
-
-      let usrIdNum = nuevo.idUsuario;
-      if (!usrIdNum) {
-        usrIdNum = parseInt(agenteActual.id.replace(/\D/g, '') || '1', 10) || 1;
-      }
-
-      const dbRes = await SupabaseService.crearReporteInfraccion({
-        idVehiculo: Number(vehIdNum) || 1,
-        idCorbatin: corbIdNum && Number(corbIdNum) > 0 ? Number(corbIdNum) : null,
-        idInfraccion: Number(infIdNum) || 1,
-        idUsuario: Number(usrIdNum) || 1,
-        ubicacionTexto: nuevo.lugar,
-        descripcionHechos: nuevo.descripcion,
-        evidencias: nuevo.evidencias,
-        evidenciasUrls: nuevo.evidencias.map((e) => e.fotoUrl),
-      });
-
-      if (dbRes?.idReporte) {
-        dbReporteId = dbRes.idReporte;
-      }
-    } catch (e) {
-      console.warn('Error guardando en Supabase:', e);
+    let vehIdNum = nuevo.idVehiculo;
+    if (!vehIdNum) {
+      vehIdNum = parseInt(nuevo.vehiculoId.replace(/\D/g, '') || '1', 10);
     }
+
+    let corbIdNum = nuevo.idCorbatin;
+    if (corbIdNum === undefined) {
+      corbIdNum = null;
+    }
+
+    let infIdNum = nuevo.idInfraccion;
+    const catalogo = catalogoInfracciones.length > 0 ? catalogoInfracciones : await SupabaseService.getCatalogoInfracciones();
+    const validExists = catalogo.some((c) => Number(c.id_infraccion) === Number(infIdNum));
+
+    if (!infIdNum || !validExists) {
+      const found =
+        catalogo.find((c) => (c.codigo || '').toLowerCase() === (nuevo.infraccionCodigo || '').toLowerCase()) ||
+        catalogo.find((c) => (c.categoria || '').toLowerCase().includes('general') || (c.nombre || '').toLowerCase().includes('otro')) ||
+        catalogo[0];
+      infIdNum = found ? Number(found.id_infraccion) : 1;
+    }
+
+    let usrIdNum = nuevo.idUsuario;
+    if (!usrIdNum) {
+      usrIdNum = parseInt(agenteActual.id.replace(/\D/g, '') || '1', 10) || 1;
+    }
+
+    const payloadParams = {
+      idVehiculo: Number(vehIdNum) || 1,
+      idCorbatin: corbIdNum && Number(corbIdNum) > 0 ? Number(corbIdNum) : null,
+      idInfraccion: Number(infIdNum) || 1,
+      idUsuario: Number(usrIdNum) || 1,
+      ubicacionTexto: nuevo.lugar,
+      descripcionHechos: nuevo.descripcion,
+      evidencias: nuevo.evidencias,
+      evidenciasUrls: nuevo.evidencias.map((e) => e.fotoUrl),
+    };
+
+    let dbReporteId: number | null = null;
+    const isOnline = await isNetworkConnected();
+
+    // Si hay internet, intentar guardar de inmediato en el servidor
+    if (isOnline) {
+      try {
+        const dbRes = await SupabaseService.crearReporteInfraccion(payloadParams);
+        if (dbRes?.idReporte) {
+          dbReporteId = dbRes.idReporte;
+        }
+      } catch (e) {
+        console.warn('[MobileContext] Error guardando directamente en Supabase:', e);
+      }
+    }
+
+    // Si falló el envío o no había conexión y es un reporte pendiente, encolar offline
+    const isOffline = !dbReporteId;
+    const finalId = dbReporteId ? `rep_${dbReporteId}` : `pending_${Date.now()}`;
+    const finalFolio = dbReporteId ? `F-2026-${String(dbReporteId).padStart(4, '0')}` : `F-2026-PEND-${folioNum}`;
 
     const completo: ReporteInfraccion = {
       ...nuevo,
-      id: dbReporteId ? `rep_${dbReporteId}` : `rep_${Date.now()}`,
-      folio: dbReporteId ? `F-2026-${String(dbReporteId).padStart(4, '0')}` : folioStr,
+      id: finalId,
+      folio: finalFolio,
       fecha: dateStr,
       hora: timeStr,
       estado: estado,
       agenteId: agenteActual.id,
+      isOfflinePending: isOffline && estado !== 'borrador',
       historial: [
         {
           id: `hist_${Date.now()}`,
           fecha: now.toISOString(),
           estado: estado,
-          detalles: estado === 'borrador' ? 'Reporte guardado como borrador.' : 'Reporte enviado a revisión de HOA.',
+          detalles: estado === 'borrador'
+            ? 'Reporte guardado como borrador.'
+            : isOffline
+            ? 'Reporte guardado localmente (sin internet). Se subirá al restablecerse la conexión.'
+            : 'Reporte enviado a revisión de HOA.',
           usuarioNombre: agenteActual.nombre,
         },
       ],
     };
 
+    // Guardar en cola persistente si es un reporte que debe subirse al servidor
+    if (isOffline && estado !== 'borrador') {
+      await queueReportForSync({
+        tempId: finalId,
+        tempFolio: finalFolio,
+        createdAt: now.toISOString(),
+        params: payloadParams,
+        reporteCompleto: completo,
+      });
+    }
+
     setReportes((prev) => {
       const updated = [completo, ...prev];
-      safeStorage.setItem('hoa_mobile_reportes', JSON.stringify(updated));
+      saveCachedReports(updated);
       return updated;
     });
 
@@ -428,7 +567,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const actualizarReporte = useCallback((reporte: ReporteInfraccion) => {
     setReportes((prev) => {
       const updated = prev.map((r) => (r.id === reporte.id ? reporte : r));
-      safeStorage.setItem('hoa_mobile_reportes', JSON.stringify(updated));
+      saveCachedReports(updated);
       return updated;
     });
   }, []);
@@ -441,11 +580,14 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       catalogoInfracciones,
       reglamentos,
       themeMode,
+      pendingSyncCount,
+      isSyncingOffline,
       toggleTheme,
       login,
       logout,
       cargarReportes,
       refrescarReportesOptimizado,
+      sincronizarPendientes,
       cargarCatalogo,
       agregarReporte,
       actualizarReporte,
@@ -457,11 +599,14 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       catalogoInfracciones,
       reglamentos,
       themeMode,
+      pendingSyncCount,
+      isSyncingOffline,
       toggleTheme,
       login,
       logout,
       cargarReportes,
       refrescarReportesOptimizado,
+      sincronizarPendientes,
       cargarCatalogo,
       agregarReporte,
       actualizarReporte,

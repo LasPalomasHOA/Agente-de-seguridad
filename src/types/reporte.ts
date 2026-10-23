@@ -19,4 +19,6 @@ export interface ReporteInfraccion {
   historial: HistorialReporte[];
   comentariosSupervisor?: string;
   sancionAplicada?: Sancion;
+  isOfflinePending?: boolean;
 }
+

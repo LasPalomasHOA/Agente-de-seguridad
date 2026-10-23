@@ -27,6 +27,7 @@ import { Evidencia } from '../types/evidencia';
 import { comprimirImagen } from '../services/imageService';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import { isNetworkConnected } from '../services/offlineSyncService';
 
 type Mode = 'camera' | 'loading' | 'result' | 'wizard' | 'confirmation';
 type WizardStep = 1 | 2 | 3;
@@ -143,6 +144,7 @@ export default function ScannerScreen() {
   const [selectedConductor, setSelectedConductor] = useState<TrabajadorRow | null>(null);
   const [sancionesActivas, setSancionesActivas] = useState<SancionDbRow[]>([]);
   const [ultimoAcceso, setUltimoAcceso] = useState<BitacoraAccesoRow | null>(null);
+  const [isOfflineScan, setIsOfflineScan] = useState<boolean>(false);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
   const [exitSuccessModal, setExitSuccessModal] = useState<{
     visible: boolean;
@@ -371,14 +373,25 @@ export default function ScannerScreen() {
         setSelectedConductor(res.conductorPrincipal || null);
         setSancionesActivas(res.sancionesActivas || []);
         setUltimoAcceso(res.ultimoAcceso || null);
+        setIsOfflineScan(Boolean(res.isOfflineData));
         setMode('result');
       } else {
-        alert(`No se encontró vehículo ni corbatín con "${cleanCode}" en la base de datos.`);
+        const isOnline = await isNetworkConnected();
+        if (!isOnline) {
+          alert(`Modo sin conexión: No se encontró "${cleanCode}" en la memoria del teléfono.\n\nPuedes ingresar las placas manualmente para continuar con la infracción.`);
+        } else {
+          alert(`No se encontró vehículo ni corbatín con "${cleanCode}" en la base de datos.`);
+        }
         setMode('camera');
         setScanned(false);
       }
     } catch (e) {
-      alert('Error de conexión con la base de datos.');
+      const isOnline = await isNetworkConnected();
+      if (!isOnline) {
+        alert('Sin conexión a internet y el registro no está en la memoria del dispositivo.');
+      } else {
+        alert('Error de conexión con la base de datos.');
+      }
       setMode('camera');
       setScanned(false);
     } finally {
@@ -402,6 +415,7 @@ export default function ScannerScreen() {
   useEffect(() => {
     if (mode === 'camera') {
       setScanned(false);
+      setIsOfflineScan(false);
       lookupInProgress.current = false;
     }
   }, [mode]);
@@ -934,6 +948,19 @@ export default function ScannerScreen() {
                   <ThemedText style={styles.volverBtnText}>VOLVER</ThemedText>
                 </Pressable>
               </View>
+
+              {/* Offline Warning Notice if scanned from local cache */}
+              {isOfflineScan && (
+                <View style={styles.offlineScanNotice}>
+                  <Ionicons name="cloud-offline" size={20} color="#B45309" />
+                  <View style={{ flex: 1 }}>
+                    <ThemedText style={styles.offlineScanNoticeTitle}>Modo sin conexión (Memoria Local)</ThemedText>
+                    <ThemedText style={styles.offlineScanNoticeSub}>
+                      Identidad obtenida del dispositivo. Sanciones y accesos en tiempo real se validarán al recuperar la red.
+                    </ThemedText>
+                  </View>
+                </View>
+              )}
 
               {/* Suspended Vehicle Card with Photo on Left */}
               <View style={styles.suspendedVehicleCard}>
@@ -1717,15 +1744,28 @@ export default function ScannerScreen() {
       {/* ─── 7. CONFIRMATION SCREEN (Image 5 Left) ─── */}
       {mode === 'confirmation' && (
         <ScrollView contentContainerStyle={styles.confirmScrollPage} showsVerticalScrollIndicator={false}>
-          {/* Green Check Halo */}
-          <View style={styles.successHalo}>
-            <Ionicons name="checkmark-circle" size={64} color="#10B981" />
-          </View>
-
-          <ThemedText style={styles.successTitleText}>¡Reporte Enviado Exitosamente!</ThemedText>
-          <ThemedText style={styles.successSubText}>
-            El reporte ha sido registrado. Un supervisor revisará la evidencia desde la plataforma administrativa.
-          </ThemedText>
+          {/* Halo Indicator */}
+          {generatedFolio.includes('PEND') ? (
+            <>
+              <View style={[styles.successHalo, { backgroundColor: '#FEF3C7' }]}>
+                <Ionicons name="cloud-offline" size={56} color="#D97706" />
+              </View>
+              <ThemedText style={styles.successTitleText}>¡Reporte Guardado sin Conexión!</ThemedText>
+              <ThemedText style={styles.successSubText}>
+                El reporte y sus evidencias se guardaron en tu dispositivo. En cuanto se detecte conexión a internet, se enviará automáticamente al HOA.
+              </ThemedText>
+            </>
+          ) : (
+            <>
+              <View style={styles.successHalo}>
+                <Ionicons name="checkmark-circle" size={64} color="#10B981" />
+              </View>
+              <ThemedText style={styles.successTitleText}>¡Reporte Enviado Exitosamente!</ThemedText>
+              <ThemedText style={styles.successSubText}>
+                El reporte ha sido registrado. Un supervisor revisará la evidencia desde la plataforma administrativa.
+              </ThemedText>
+            </>
+          )}
 
           {/* Folio Receipt Card */}
           <View style={styles.folioReceiptCard}>
@@ -1739,8 +1779,10 @@ export default function ScannerScreen() {
             </View>
             <View style={styles.receiptLine}>
               <ThemedText style={styles.receiptLabel}>Estado:</ThemedText>
-              <View style={styles.pendingPillMini}>
-                <ThemedText style={styles.pendingPillMiniText}>Pendiente de revisión</ThemedText>
+              <View style={[styles.pendingPillMini, generatedFolio.includes('PEND') && { backgroundColor: '#FEF3C7' }]}>
+                <ThemedText style={[styles.pendingPillMiniText, generatedFolio.includes('PEND') && { color: '#B45309' }]}>
+                  {generatedFolio.includes('PEND') ? 'Pendiente de sincronizar' : 'Pendiente de revisión'}
+                </ThemedText>
               </View>
             </View>
           </View>
@@ -2479,6 +2521,28 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
     justifyContent: 'space-between',
+  },
+  offlineScanNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1.5,
+    borderColor: '#FDE68A',
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 12,
+    gap: 10,
+  },
+  offlineScanNoticeTitle: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    color: '#92400E',
+  },
+  offlineScanNoticeSub: {
+    fontSize: 11,
+    color: '#B45309',
+    marginTop: 2,
+    lineHeight: 15,
   },
   catCard: {
     width: '48.5%',
