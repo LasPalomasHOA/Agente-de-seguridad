@@ -344,20 +344,20 @@ export interface OfflineVehicleRecord {
 const offlineVehicleMemoryMap = new Map<string, OfflineVehicleRecord>();
 
 /**
- * Guarda o actualiza un vehículo en el catálogo local offline aprovechando consultas que ya ocurrieron (0 bytes Egress extra)
+ * Guarda o actualiza un vehículo o corbatín en el catálogo local offline aprovechando consultas que ya ocurrieron (0 bytes Egress extra)
  */
 export async function saveVehicleToOfflineCatalog(result: any): Promise<void> {
-  if (!result?.vehiculo?.id_vehiculo) return;
+  if (!result?.vehiculo?.id_vehiculo && !result?.corbatin?.id_corbatin && !result?.corbatin?.numero) return;
   try {
-    const v = result.vehiculo;
+    const v = result.vehiculo || {};
     const c = result.corbatin;
     const e = result.empresa;
     const cond = result.conductorPrincipal;
 
     const record: OfflineVehicleRecord = {
-      id_vehiculo: Number(v.id_vehiculo),
+      id_vehiculo: Number(v.id_vehiculo) || 0,
       placas: (v.placas || '').toUpperCase().trim(),
-      marca: v.marca || '',
+      marca: v.marca || (c?.numero ? `Corbatín Nº ${c.numero}` : ''),
       modelo: v.modelo || '',
       color: v.color || '',
       foto_url: v.foto_url || null,
@@ -372,11 +372,13 @@ export async function saveVehicleToOfflineCatalog(result: any): Promise<void> {
     };
 
     // Actualizar mapa en memoria RAM
-    offlineVehicleMemoryMap.set(`veh_${record.id_vehiculo}`, record);
+    if (record.id_vehiculo > 0) {
+      offlineVehicleMemoryMap.set(`veh_${record.id_vehiculo}`, record);
+    }
     if (record.numero_corbatin) {
       offlineVehicleMemoryMap.set(`num_${record.numero_corbatin}`, record);
     }
-    if (record.placas) {
+    if (record.placas && record.placas !== 'S/P') {
       const cleanP = record.placas.replace(/[-_ ]/g, '');
       offlineVehicleMemoryMap.set(`plate_${cleanP}`, record);
     }
@@ -384,14 +386,69 @@ export async function saveVehicleToOfflineCatalog(result: any): Promise<void> {
     // Persistir en AsyncStorage en segundo plano
     const current = await getOfflineVehiclesCatalog();
     const filtered = current.filter(
-      (item) => item.id_vehiculo !== record.id_vehiculo &&
+      (item) =>
+        (record.id_vehiculo > 0 ? item.id_vehiculo !== record.id_vehiculo : true) &&
         (!record.numero_corbatin || String(item.numero_corbatin) !== String(record.numero_corbatin))
     );
     filtered.unshift(record);
-    const sliced = filtered.slice(0, 400); // Límite de 400 vehículos consultados previamente (~90 KB en disco)
+    const sliced = filtered.slice(0, 400); // Límite de 400 registros (~90 KB en disco)
     await AsyncStorage.setItem(OFFLINE_VEHICLES_CATALOG_KEY, JSON.stringify(sliced));
   } catch (err) {
     console.warn('[OfflineCatalog] Error guardando vehículo en catálogo local:', err);
+  }
+}
+
+/**
+ * Guarda en memoria y disco una lista completa de corbatines para disponibilidad offline inmediata
+ */
+export async function saveCorbatinesListToOfflineCatalog(corbatines: any[]): Promise<void> {
+  if (!Array.isArray(corbatines) || corbatines.length === 0) return;
+  try {
+    const current = await getOfflineVehiclesCatalog();
+    const currentMap = new Map<string, OfflineVehicleRecord>();
+    for (const item of current) {
+      if (item.numero_corbatin) currentMap.set(`num_${item.numero_corbatin}`, item);
+      else if (item.id_vehiculo > 0) currentMap.set(`veh_${item.id_vehiculo}`, item);
+    }
+
+    for (const c of corbatines) {
+      const v = c.vehiculo || {};
+      const num = c.numero !== undefined && c.numero !== null ? String(c.numero) : null;
+      if (!num && !v.id_vehiculo) continue;
+
+      const record: OfflineVehicleRecord = {
+        id_vehiculo: Number(v.id_vehiculo || c.id_vehiculo) || 0,
+        placas: (v.placas || c.placasAsignadas || '').toUpperCase().trim(),
+        marca: v.marca || (c.tipos === 'VERDE' ? 'Corbatín Verde' : 'Corbatín HOA'),
+        modelo: v.modelo || (num ? `Nº ${num}` : ''),
+        color: v.color || '',
+        foto_url: v.foto_url || null,
+        id_corbatin: c.id_corbatin ? Number(c.id_corbatin) : null,
+        numero_corbatin: num,
+        corbatin_estatus: c.estatus || 'activo',
+        id_empresa: v.id_empresa || c.id_empresa || 1,
+        empresa_nombre: c.empresa_nombre || c.empresaNombre || v.empresa?.razon_social || 'Empresa Registrada HOA',
+        conductor_nombre: c.conductorAsignado || undefined,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (record.id_vehiculo > 0) {
+        offlineVehicleMemoryMap.set(`veh_${record.id_vehiculo}`, record);
+      }
+      if (record.numero_corbatin) {
+        offlineVehicleMemoryMap.set(`num_${record.numero_corbatin}`, record);
+        currentMap.set(`num_${record.numero_corbatin}`, record);
+      }
+      if (record.placas && record.placas !== 'S/P') {
+        const cleanP = record.placas.replace(/[-_ ]/g, '');
+        offlineVehicleMemoryMap.set(`plate_${cleanP}`, record);
+      }
+    }
+
+    const merged = Array.from(currentMap.values()).slice(0, 400);
+    await AsyncStorage.setItem(OFFLINE_VEHICLES_CATALOG_KEY, JSON.stringify(merged));
+  } catch (err) {
+    console.warn('[OfflineCatalog] Error guardando catálogo de corbatines:', err);
   }
 }
 

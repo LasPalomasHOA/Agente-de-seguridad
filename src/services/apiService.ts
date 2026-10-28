@@ -15,7 +15,12 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { supabase, isSupabaseConfigured, PROJECTIONS, getCountOptimized } from '../lib/supabase';
 import { uploadEvidenciaASupabase, comprimirImagen } from './imageService';
-import { searchOfflineVehicleCatalog, saveVehicleToOfflineCatalog, isNetworkConnected } from './offlineSyncService';
+import {
+  searchOfflineVehicleCatalog,
+  saveVehicleToOfflineCatalog,
+  saveCorbatinesListToOfflineCatalog,
+  isNetworkConnected,
+} from './offlineSyncService';
 
 const resolveApiBaseUrl = (): string => {
   const envUrl = (process.env.EXPO_PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
@@ -60,6 +65,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Almacenamiento seguro y persistente para caché entre sesiones y recargas
 const memoryStorageMap = new Map<string, string>();
+
+// Pre-cargar token y credenciales críticas en memoria de inmediato para disponibilidad síncrona
+AsyncStorage.getItem('hoa_mobile_token')
+  .then((tok) => {
+    if (tok) memoryStorageMap.set('hoa_mobile_token', tok);
+  })
+  .catch(() => {});
 
 export const safeStorage = {
   getItem: (key: string): string | null => {
@@ -204,8 +216,16 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
     ...((options?.headers as any) || {}),
   };
 
-  // Inyectar token de sesión JWT si existe
-  const sessionToken = safeStorage.getItem('hoa_mobile_token');
+  // Inyectar token de sesión JWT si existe (con recuperación asíncrona segura si la app acaba de abrirse en móvil)
+  let sessionToken = safeStorage.getItem('hoa_mobile_token');
+  if (!sessionToken) {
+    try {
+      sessionToken = await AsyncStorage.getItem('hoa_mobile_token');
+      if (sessionToken) {
+        memoryStorageMap.set('hoa_mobile_token', sessionToken);
+      }
+    } catch { }
+  }
   if (sessionToken && !headers['Authorization'] && !headers['authorization']) {
     headers['Authorization'] = `Bearer ${sessionToken}`;
   }
@@ -605,7 +625,7 @@ export const ApiService = {
           const val = valParts.join(':').trim();
           if (val) {
             candidates.tokens.push(val);
-            if (/^(?:CORB|CORBATIN|NUM|NUMERO|NO|TAG)$/i.test(key)) {
+            if (/^(?:CORB|CORBATIN|CORB[-_ ]*VERDE|CORBATIN[-_ ]*VERDE|VERDE|NUM|NUMERO|NO|TAG)$/i.test(key)) {
               const numVal = parseInt(val.replace(/\D/g, ''), 10);
               if (!isNaN(numVal) && numVal > 0) {
                 candidates.numbers.push(numVal);
@@ -627,8 +647,8 @@ export const ApiService = {
       }
     }
 
-    // 2. Extracción directa con Expresiones Regulares para corbatín
-    const corbMatches = clean.matchAll(/(?:CORB(?:ATIN)?|NUM(?:ERO)?|TAG|C)[-:_ #=]*(?:20\d\d[-_ ]*)?0*(\d+)/gi);
+    // 2. Extracción directa con Expresiones Regulares para corbatín (incluyendo corbatines verdes y normales)
+    const corbMatches = clean.matchAll(/(?:CORB(?:ATIN)?(?:[-_ ]*VERDE)?|NUM(?:ERO)?|TAG|VERDE|C)[-:_ #=]*(?:20\d\d[-_ ]*)?0*(\d+)/gi);
     for (const match of corbMatches) {
       if (match[1]) {
         const n = parseInt(match[1], 10);
@@ -690,7 +710,7 @@ export const ApiService = {
     }
 
     // 6. Formatos con prefijos
-    const prefixMatch = clean.match(/^(?:C|CORB|CORBATIN|LP)[-_ ]*(?:20\d\d[-_ ]*)?0*(\d+)$/i);
+    const prefixMatch = clean.match(/^(?:C|CORB|CORBATIN|CORB[-_ ]*VERDE|VERDE|LP|V)[-_ #=]*(?:20\d\d[-_ ]*)?0*(\d+)$/i);
     if (prefixMatch && prefixMatch[1]) {
       candidates.numbers.push(parseInt(prefixMatch[1], 10));
     }
@@ -824,15 +844,19 @@ export const ApiService = {
       const { primaryKey, aliasKeys, numbers, plates } = this.getCanonicalLookupKeys(cleanParam);
       for (const key of aliasKeys) {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
-        if (cachedResult && cachedResult.vehiculo && Number(cachedResult.vehiculo.id_vehiculo) > 0) {
+        if (cachedResult && (cachedResult.vehiculo || cachedResult.corbatin)) {
           // Consultar en vivo el último acceso y las sanciones activas (respetando TTL_SANCIONES de 30s)
           try {
             const [liveAcceso, liveSanciones] = await Promise.all([
-              this.getUltimoAcceso(
-                cachedResult.vehiculo.id_vehiculo,
-                cachedResult.corbatin?.id_corbatin
-              ).catch(() => null),
-              this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: false }).catch(() => []),
+              cachedResult.vehiculo?.id_vehiculo
+                ? this.getUltimoAcceso(
+                    cachedResult.vehiculo.id_vehiculo,
+                    cachedResult.corbatin?.id_corbatin
+                  ).catch(() => null)
+                : Promise.resolve(null),
+              cachedResult.vehiculo?.id_vehiculo
+                ? this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: false }).catch(() => [])
+                : Promise.resolve([]),
             ]);
 
             cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
@@ -858,10 +882,10 @@ export const ApiService = {
 
       // 2. Consulta puntual directa con filtros de servidor (Ahorro de Egress >95%)
       try {
-        // 2.1 Búsqueda puntual estricta por número de corbatín
+        // 2.1 Búsqueda puntual estricta por número de corbatín (limit=5 para resolver duplicados Normal vs Verde sin egress)
         if (numbers.length > 0) {
           const targetNum = numbers[0];
-          const directCorbRes = await fetchJson(`/corbatines?numero=${targetNum}&limit=1`);
+          const directCorbRes = await fetchJson(`/corbatines?numero=${targetNum}&limit=5`);
           expressSucceeded = true;
           const corbList = Array.isArray(directCorbRes)
             ? directCorbRes
@@ -870,15 +894,19 @@ export const ApiService = {
           if (corbList.length > 0) {
             const matchingCorbs = corbList.filter((c: any) => Number(c.numero) === targetNum);
             if (matchingCorbs.length > 0) {
-              // Priorizar el corbatín que tenga vehículo asignado y esté activo
-              const matched =
-                matchingCorbs.find(
-                  (c: any) =>
-                    (c.vehiculo || c.id_vehiculo) &&
-                    String(c.estatus || '').toLowerCase() === 'activo'
-                ) ||
-                matchingCorbs.find((c: any) => c.vehiculo || c.id_vehiculo) ||
-                matchingCorbs[0];
+              const isVerdeSearch = /VERDE/i.test(cleanParam);
+              const matched = isVerdeSearch
+                ? (matchingCorbs.find((c: any) => String(c.tipos || c.tipo || '').toUpperCase() === 'VERDE') || matchingCorbs[0])
+                : (
+                    matchingCorbs.find(
+                      (c: any) =>
+                        (c.vehiculo || c.id_vehiculo) &&
+                        String(c.estatus || '').toLowerCase() === 'activo'
+                    ) ||
+                    matchingCorbs.find((c: any) => c.vehiculo || c.id_vehiculo) ||
+                    matchingCorbs.find((c: any) => String(c.estatus || '').toLowerCase() === 'activo') ||
+                    matchingCorbs[0]
+                  );
 
               if (matched && Number(matched.numero) === targetNum) {
                 matchedCorbatin = matched;
@@ -1132,7 +1160,14 @@ export const ApiService = {
       ]);
 
       const sancionesActivas = (todasSanciones || [])
-        .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo')
+        .filter(
+          (s: any) =>
+            s.estatus === 'ACTIVA' ||
+            s.estatus === 'activa' ||
+            s.estatus === 'activo' ||
+            s.estatus === 'RATIFICADA' ||
+            s.estatus === 'ratificada'
+        )
         .map((s: any) => ({
           id_sancion: s.id_sancion,
           id_reporte: s.id_reporte || 1,
@@ -1174,6 +1209,9 @@ export const ApiService = {
           apiCache.setMemoryOnly(key, result);
         }
       }
+
+      // Guardar también en almacenamiento offline local para acceso sin conexión inmediato
+      saveVehicleToOfflineCatalog(result).catch(() => {});
       if (vehiculoRow.id_vehiculo) {
         apiCache.setMemoryOnly(`lookup_veh_${vehiculoRow.id_vehiculo}`, result);
       }
@@ -1391,18 +1429,20 @@ export const ApiService = {
   }): Promise<{ idReporte: number } | null> {
     try {
       const now = new Date();
+      // La sanción entra en vigor al día siguiente a las 12:00 AM (hora local)
+      const fechaInicioSancion = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
       // Calcular nivel de reincidencia con la cuenta local/cacheada existente (0 bytes egress adicional)
       const prevCount = await this.getReportesCount({ idVehiculo: params.idVehiculo }).catch(() => 0);
-      const nuevoNivel = prevCount + 1;
+      const nuevoNivel = Math.min(prevCount + 1, 4);
       let fechaFinStr: string | null = null;
       if (nuevoNivel === 1) {
-        fechaFinStr = now.toISOString(); // 1ª Falta: Llamado de atención
+        fechaFinStr = null; // 1ª Falta: Llamado de atención
       } else if (nuevoNivel === 2) {
-        fechaFinStr = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(); // 2ª Falta: 24 horas
+        fechaFinStr = new Date(fechaInicioSancion.getTime() + 24 * 60 * 60 * 1000).toISOString(); // 2ª Falta: 24 horas desde las 12:00 AM del día siguiente
       } else if (nuevoNivel === 3) {
-        fechaFinStr = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 3ª Falta: 7 días
+        fechaFinStr = new Date(fechaInicioSancion.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 3ª Falta: 1 semana (7 días) desde las 12:00 AM del día siguiente
       } else {
-        fechaFinStr = null; // 4ª Falta: Permanente
+        fechaFinStr = null; // 4ª Falta: Definitiva
       }
 
       // 1. Procesar y subir evidencias a Supabase Storage (comprimidas a WebP)
@@ -1487,7 +1527,7 @@ export const ApiService = {
                   id_empresa: 1,
                   id_regla: nuevoNivel <= 4 ? nuevoNivel : 4,
                   numero_reincidencia: nuevoNivel,
-                  fecha_inicio: now.toISOString(),
+                  fecha_inicio: fechaInicioSancion.toISOString(),
                   fecha_fin: fechaFinStr,
                   estatus: 'activa',
                   motivo: params.descripcionHechos || 'Infracción reglamentaria',
@@ -2226,6 +2266,7 @@ export const ApiService = {
       try {
         const data = await fetchJson('/corbatines?limit=50');
         if (Array.isArray(data)) {
+          saveCorbatinesListToOfflineCatalog(data).catch(() => {});
           return data;
         }
       } catch {
@@ -2283,7 +2324,7 @@ export const ApiService = {
             let query = (supabase as any)
               .from('sanciones' as any)
               .select(PROJECTIONS.SANCIONES_LIGHT)
-              .in('estatus', ['activa', 'ACTIVA', 'activo'])
+              .in('estatus', ['activa', 'ACTIVA', 'activo', 'RATIFICADA', 'ratificada'])
               .limit(10);
             if (idVehiculo) query = query.eq('id_vehiculo', idVehiculo);
             const { data } = await query;

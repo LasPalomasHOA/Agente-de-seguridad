@@ -17,37 +17,7 @@ import {
   subscribeToNetworkState,
   SyncResult,
 } from '../services/offlineSyncService';
-
-const memoryStorageMap = new Map<string, string>();
-
-const safeStorage = {
-  getItem: (key: string): string | null => {
-    try {
-      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-        return window.localStorage.getItem(key);
-      }
-    } catch {}
-    return memoryStorageMap.get(key) || null;
-  },
-  setItem: (key: string, value: string): void => {
-    try {
-      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(key, value);
-      }
-    } catch {}
-    memoryStorageMap.set(key, value);
-    AsyncStorage.setItem(key, value).catch(() => {});
-  },
-  removeItem: (key: string): void => {
-    try {
-      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.removeItem(key);
-      }
-    } catch {}
-    memoryStorageMap.delete(key);
-    AsyncStorage.removeItem(key).catch(() => {});
-  },
-};
+import { safeStorage } from '../services/apiService';
 
 const computeTurno = (): string => {
   const hour = new Date().getHours();
@@ -143,6 +113,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const [infs, regs] = await Promise.all([
         SupabaseService.getCatalogoInfracciones(forceRefresh),
         SupabaseService.getReglamentos(forceRefresh),
+        SupabaseService.getCorbatines().catch(() => []),
       ]);
       if (infs && infs.length > 0) setCatalogoInfracciones(infs);
       if (regs && regs.length > 0) setReglamentos(regs);
@@ -335,13 +306,18 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   useEffect(() => {
     const initApp = async () => {
       try {
-        const [localAuth, localAgente, localTheme, cachedList, pendingOffline] = await Promise.all([
+        const [localAuth, localAgente, localTheme, localToken, cachedList, pendingOffline] = await Promise.all([
           AsyncStorage.getItem('hoa_mobile_auth').catch(() => safeStorage.getItem('hoa_mobile_auth')),
           AsyncStorage.getItem('hoa_mobile_agente').catch(() => safeStorage.getItem('hoa_mobile_agente')),
           AsyncStorage.getItem('hoa_mobile_theme').catch(() => safeStorage.getItem('hoa_mobile_theme')),
+          AsyncStorage.getItem('hoa_mobile_token').catch(() => safeStorage.getItem('hoa_mobile_token')),
           getCachedReports().catch(() => []),
           getPendingReports().catch(() => []),
         ]);
+
+        if (localToken) {
+          safeStorage.setItem('hoa_mobile_token', localToken);
+        }
 
         if (pendingOffline && pendingOffline.length > 0) {
           setPendingSyncCount(pendingOffline.length);

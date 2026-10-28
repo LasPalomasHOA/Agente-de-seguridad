@@ -11,6 +11,7 @@ import {
   Modal,
   Platform,
   KeyboardAvoidingView,
+  Keyboard,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -345,10 +346,12 @@ export default function ScannerScreen() {
     }
   };
 
+  const cameraScrollRef = React.useRef<ScrollView>(null);
   const lookupInProgress = React.useRef(false);
   const lastScanTimeRef = React.useRef<number>(0);
 
   const executeLookup = async (code: string) => {
+    Keyboard.dismiss();
     const cleanCode = (code || '').trim();
     if (!cleanCode) return;
     if (lookupInProgress.current) return;
@@ -363,9 +366,9 @@ export default function ScannerScreen() {
     setMode('loading');
     try {
       const res = await SupabaseService.buscarCorbatin(cleanCode);
-      if (res && res.vehiculo) {
+      if (res && (res.vehiculo || res.corbatin)) {
         // Si el vehículo no trae foto en memoria y estamos online, pedirla de forma puntual y cacheada
-        if (!res.vehiculo.foto_url && res.vehiculo.id_vehiculo && online) {
+        if (res.vehiculo && !res.vehiculo.foto_url && res.vehiculo.id_vehiculo && online) {
           try {
             const foto = await SupabaseService.getVehiculoFoto(res.vehiculo.id_vehiculo);
             if (foto) {
@@ -461,6 +464,7 @@ export default function ScannerScreen() {
 
   // Actions
   const handleManualSearch = (codeToSearch?: string) => {
+    Keyboard.dismiss();
     const target = codeToSearch || manualCorbatinInput;
     if (!target.trim()) return;
     executeLookup(target.trim());
@@ -632,13 +636,41 @@ export default function ScannerScreen() {
   const evaluacionSancion = React.useMemo(() => {
     const estatusVehiculo = (selectedVehicle?.estatus_acceso || '').toLowerCase();
     const estatusCorbatin = (selectedCorbatin?.estatus || '').toLowerCase();
+    const ahoraMs = nowTick;
+
+    // Filtrar únicamente las sanciones que YA entraron en vigor (ahoraMs >= fechaInicioMs)
+    // y que no han expirado. Todas las sanciones (1ª, 2ª, 3ª y 4ª) inician al día siguiente
+    // a las 12:00 AM (hora local) de haber sido aceptadas por el supervisor.
+    const sancionesEnVigor = (sancionesActivas || []).filter((s) => {
+      const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
+      const inicioMs = parseSqlUtcDate(s.fecha_inicio || (s as any).created_at);
+      if (ahoraMs < inicioMs) {
+        return false; // Aún no entra en vigor (se refleja hasta el día siguiente a las 12:00 AM hora local)
+      }
+      if (nivelS === 2) {
+        const finMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : inicioMs + 24 * 60 * 60 * 1000;
+        return ahoraMs < finMs;
+      }
+      if (nivelS === 3) {
+        const finMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : inicioMs + 7 * 24 * 60 * 60 * 1000;
+        return ahoraMs < finMs;
+      }
+      if (s.fecha_fin) {
+        const finMs = parseSqlUtcDate(s.fecha_fin);
+        if (ahoraMs >= finMs) return false;
+      }
+      return true;
+    });
+
+    const tieneSancionesRegistradas = Boolean(sancionesActivas && sancionesActivas.length > 0);
 
     if (
       estatusCorbatin === 'cancelado' ||
       estatusCorbatin === 'suspendido' ||
       estatusVehiculo === 'denegado' ||
       estatusVehiculo === 'restringido' ||
-      estatusVehiculo === 'bloqueado'
+      estatusVehiculo === 'bloqueado' ||
+      (estatusVehiculo === 'suspendido' && !tieneSancionesRegistradas)
     ) {
       return {
         isBlocked: true,
@@ -655,16 +687,15 @@ export default function ScannerScreen() {
       };
     }
 
-    if (!sancionesActivas || sancionesActivas.length === 0) {
+    if (sancionesEnVigor.length === 0) {
       return null;
     }
 
-    // Tomar la sanción activa más relevante (mayor nivel o más reciente)
-    const sancion = [...sancionesActivas].sort(
+    // Tomar la sanción en vigor más relevante (mayor nivel o más reciente)
+    const sancion = [...sancionesEnVigor].sort(
       (a, b) => (Number(b.numero_reincidencia) || Number(b.id_regla) || 1) - (Number(a.numero_reincidencia) || Number(a.id_regla) || 1)
     )[0];
     const nivel = Number(sancion.numero_reincidencia) || Number(sancion.id_regla) || 1;
-    const ahoraMs = nowTick;
     const fechaInicioMs = parseSqlUtcDate(sancion.fecha_inicio || (sancion as any).created_at);
 
     // ─── 1ª FALTA: Llamado de atención (Banner amarillo informativo, acceso permitido) ───
@@ -686,7 +717,7 @@ export default function ScannerScreen() {
 
     // ─── 2ª FALTA: Suspensión temporal de 24 horas (1 Día) ───
     if (nivel === 2) {
-      const fechaFinMs = fechaInicioMs + 24 * 60 * 60 * 1000;
+      const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 24 * 60 * 60 * 1000;
 
       if (ahoraMs < fechaFinMs) {
         const diffMs = fechaFinMs - ahoraMs;
@@ -719,7 +750,7 @@ export default function ScannerScreen() {
 
     // ─── 3ª FALTA: Suspensión de 1 semana (Bloqueo reglamentario de 7 días dinámico) ───
     if (nivel === 3) {
-      const fechaFinMs = fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
+      const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
 
       if (ahoraMs < fechaFinMs) {
         const diffMs = fechaFinMs - ahoraMs;
@@ -778,168 +809,197 @@ export default function ScannerScreen() {
     <View style={[styles.container, { backgroundColor: '#F8FAFC' }]}>
       {/* ─── 1. CAMERA VIEW (Image 1 Right) ─── */}
       {mode === 'camera' && (
-        <ScrollView contentContainerStyle={styles.scrollPage} showsVerticalScrollIndicator={false}>
-          {/* ─── ANIMATED RESORT HEADER ─── */}
-          <ResortHeader
-            title="Verificación de Acceso"
-            subtitle="Escanee el código QR del corbatín o ingrese el número."
-            rightElement={
-              <View style={styles.miniResortTagBadge}>
-                <ThemedText style={styles.miniResortTagText}>
-                  {permission?.granted ? 'Cámara Activa' : 'Cámara'}
-                </ThemedText>
-              </View>
-            }
-          />
-
-          {/* Camera Viewfinder Box */}
-          <View style={styles.viewfinderDarkBox}>
-            {!permission ? (
-              <View style={styles.cameraLoadingBox}>
-                <ActivityIndicator size="large" color="#10B981" />
-                <ThemedText style={styles.cameraLoadingText}>Inicializando sensor de cámara...</ThemedText>
-              </View>
-            ) : !permission.granted ? (
-              /* Permisos requeridos */
-              <View style={styles.permissionCard}>
-                <View style={styles.permissionIconCircle}>
-                  <Ionicons name="camera" size={32} color="#10B981" />
-                </View>
-                <ThemedText style={styles.permissionTitle}>Permiso de Cámara Requerido</ThemedText>
-                <ThemedText style={styles.permissionDesc}>
-                  Para escanear corbatines QR en tiempo real, autorice el acceso a la cámara de su dispositivo.
-                </ThemedText>
-                <Pressable
-                  onPress={requestPermission}
-                  style={({ pressed }) => [
-                    styles.grantPermissionBtn,
-                    pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
-                  ]}
-                >
-                  <Ionicons name="shield-checkmark" size={18} color="#ffffff" style={{ marginRight: 6 }} />
-                  <ThemedText style={styles.grantPermissionBtnText}>Conceder Permiso</ThemedText>
-                </Pressable>
-              </View>
-            ) : (
-              /* Cámara en vivo con HUD */
-              <View style={styles.cameraFrameWrapper}>
-                <CameraView
-                  style={StyleSheet.absoluteFill}
-                  facing={facing}
-                  enableTorch={torch}
-                  barcodeScannerSettings={{
-                    barcodeTypes: ['qr'],
-                  }}
-                  onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
-                />
-
-                {/* Camera Top Controls Bar */}
-                <View style={styles.cameraTopControls}>
-                  <View style={styles.cameraLeftBadges}>
-                    <View style={styles.liveBadgePill}>
-                      <View style={styles.liveBlinkingDot} />
-                      <ThemedText style={styles.liveBadgeText}>EN VIVO</ThemedText>
-                    </View>
-                    <View style={[styles.cameraNetworkPill, !isOnline && styles.cameraNetworkPillOffline]}>
-                      <Ionicons
-                        name={isOnline ? 'cloud-done' : 'cloud-offline'}
-                        size={12}
-                        color={isOnline ? '#34D399' : '#FBBF24'}
-                      />
-                      <ThemedText style={[styles.cameraNetworkPillText, !isOnline && styles.cameraNetworkPillTextOffline]}>
-                        {isOnline ? 'En Línea' : 'Offline (Local)'}
-                      </ThemedText>
-                    </View>
-                  </View>
-
-                  <View style={styles.cameraActionsRow}>
-                    {/* Torch toggle */}
-                    <Pressable
-                      onPress={() => setTorch(!torch)}
-                      style={[
-                        styles.cameraControlCircleBtn,
-                        torch && { backgroundColor: '#F59E0B', borderColor: '#FDE68A' },
-                      ]}
-                    >
-                      <Ionicons
-                        name={torch ? 'flashlight' : 'flashlight-outline'}
-                        size={18}
-                        color={torch ? '#0F172A' : '#ffffff'}
-                      />
-                    </Pressable>
-
-                    {/* Facing toggle */}
-                    <Pressable
-                      onPress={() => setFacing((prev) => (prev === 'back' ? 'front' : 'back'))}
-                      style={styles.cameraControlCircleBtn}
-                    >
-                      <Ionicons name="camera-reverse-outline" size={18} color="#ffffff" />
-                    </Pressable>
-                  </View>
-                </View>
-
-                {/* Focus Target Frame */}
-                <View style={styles.focusFrame}>
-                  <Animated.View
-                    style={[
-                      styles.laserLine,
-                      { backgroundColor: '#10B981', shadowColor: '#10B981', transform: [{ translateY: laserAnim }] },
-                    ]}
-                  />
-                  {/* Emerald Green Corner Brackets */}
-                  <View style={[styles.cornerBracket, styles.bracketTL, { borderColor: '#10B981' }]} />
-                  <View style={[styles.cornerBracket, styles.bracketTR, { borderColor: '#10B981' }]} />
-                  <View style={[styles.cornerBracket, styles.bracketBL, { borderColor: '#10B981' }]} />
-                  <View style={[styles.cornerBracket, styles.bracketBR, { borderColor: '#10B981' }]} />
-                </View>
-
-                {/* Bottom Instructions inside Camera */}
-                <View style={styles.cameraBottomPill}>
-                  <ThemedText style={styles.cameraBottomPillText}>
-                    Alinee el código QR dentro del recuadro
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
+        >
+          <ScrollView
+            ref={cameraScrollRef}
+            contentContainerStyle={[styles.scrollPage, { paddingBottom: 260 }]}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+          >
+            {/* ─── ANIMATED RESORT HEADER ─── */}
+            <ResortHeader
+              title="Verificación de Acceso"
+              subtitle="Escanee el código QR del corbatín o ingrese el número."
+              rightElement={
+                <View style={styles.miniResortTagBadge}>
+                  <ThemedText style={styles.miniResortTagText}>
+                    {permission?.granted ? 'Cámara Activa' : 'Cámara'}
                   </ThemedText>
                 </View>
-              </View>
-            )}
-          </View>
+              }
+            />
 
-          {/* Manual Input Card */}
-          <View style={styles.manualEntryCard}>
-            <ThemedText style={styles.manualEntryHeading}>Ingresar manualmente</ThemedText>
-            <ThemedText style={styles.manualEntryLabel}>Número de Corbatín o Placas</ThemedText>
-            <View style={styles.manualEntryRow}>
-              <TextInput
-                value={manualCorbatinInput}
-                onChangeText={setManualCorbatinInput}
-                placeholder="Ej. C-102 o 70"
-                placeholderTextColor="#94a3b8"
-                style={styles.manualTextInput}
-                autoCapitalize="characters"
-                onSubmitEditing={() => handleManualSearch()}
-              />
-              <Pressable
-                onPress={() => handleManualSearch()}
-                style={({ pressed }) => [
-                  styles.manualSearchButton,
-                  { backgroundColor: '#0D6E5F' },
-                  pressed && { opacity: 0.9 },
-                ]}
-              >
-                <ThemedText style={[styles.manualSearchButtonText, { color: '#ffffff' }]}>
-                  Buscar
-                </ThemedText>
-              </Pressable>
+            {/* Camera Viewfinder Box */}
+            <View style={styles.viewfinderDarkBox}>
+              {!permission ? (
+                <View style={styles.cameraLoadingBox}>
+                  <ActivityIndicator size="large" color="#10B981" />
+                  <ThemedText style={styles.cameraLoadingText}>Inicializando sensor de cámara...</ThemedText>
+                </View>
+              ) : !permission.granted ? (
+                /* Permisos requeridos */
+                <View style={styles.permissionCard}>
+                  <View style={styles.permissionIconCircle}>
+                    <Ionicons name="camera" size={32} color="#10B981" />
+                  </View>
+                  <ThemedText style={styles.permissionTitle}>Permiso de Cámara Requerido</ThemedText>
+                  <ThemedText style={styles.permissionDesc}>
+                    Para escanear corbatines QR en tiempo real, autorice el acceso a la cámara de su dispositivo.
+                  </ThemedText>
+                  <Pressable
+                    onPress={requestPermission}
+                    style={({ pressed }) => [
+                      styles.grantPermissionBtn,
+                      pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+                    ]}
+                  >
+                    <Ionicons name="shield-checkmark" size={18} color="#ffffff" style={{ marginRight: 6 }} />
+                    <ThemedText style={styles.grantPermissionBtnText}>Conceder Permiso</ThemedText>
+                  </Pressable>
+                </View>
+              ) : (
+                /* Cámara en vivo con HUD */
+                <View style={styles.cameraFrameWrapper}>
+                  <CameraView
+                    style={StyleSheet.absoluteFill}
+                    facing={facing}
+                    enableTorch={torch}
+                    barcodeScannerSettings={{
+                      barcodeTypes: ['qr'],
+                    }}
+                    onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
+                  />
+
+                  {/* Camera Top Controls Bar */}
+                  <View style={styles.cameraTopControls}>
+                    <View style={styles.cameraLeftBadges}>
+                      <View style={styles.liveBadgePill}>
+                        <View style={styles.liveBlinkingDot} />
+                        <ThemedText style={styles.liveBadgeText}>EN VIVO</ThemedText>
+                      </View>
+                      <View style={[styles.cameraNetworkPill, !isOnline && styles.cameraNetworkPillOffline]}>
+                        <Ionicons
+                          name={isOnline ? 'cloud-done' : 'cloud-offline'}
+                          size={12}
+                          color={isOnline ? '#34D399' : '#FBBF24'}
+                        />
+                        <ThemedText style={[styles.cameraNetworkPillText, !isOnline && styles.cameraNetworkPillTextOffline]}>
+                          {isOnline ? 'En Línea' : 'Offline (Local)'}
+                        </ThemedText>
+                      </View>
+                    </View>
+
+                    <View style={styles.cameraActionsRow}>
+                      {/* Torch toggle */}
+                      <Pressable
+                        onPress={() => setTorch(!torch)}
+                        style={[
+                          styles.cameraControlCircleBtn,
+                          torch && { backgroundColor: '#F59E0B', borderColor: '#FDE68A' },
+                        ]}
+                      >
+                        <Ionicons
+                          name={torch ? 'flashlight' : 'flashlight-outline'}
+                          size={18}
+                          color={torch ? '#0F172A' : '#ffffff'}
+                        />
+                      </Pressable>
+
+                      {/* Facing toggle */}
+                      <Pressable
+                        onPress={() => setFacing((prev) => (prev === 'back' ? 'front' : 'back'))}
+                        style={styles.cameraControlCircleBtn}
+                      >
+                        <Ionicons name="camera-reverse-outline" size={18} color="#ffffff" />
+                      </Pressable>
+                    </View>
+                  </View>
+
+                  {/* Focus Target Frame */}
+                  <View style={styles.focusFrame}>
+                    <Animated.View
+                      style={[
+                        styles.laserLine,
+                        { backgroundColor: '#10B981', shadowColor: '#10B981', transform: [{ translateY: laserAnim }] },
+                      ]}
+                    />
+                    {/* Emerald Green Corner Brackets */}
+                    <View style={[styles.cornerBracket, styles.bracketTL, { borderColor: '#10B981' }]} />
+                    <View style={[styles.cornerBracket, styles.bracketTR, { borderColor: '#10B981' }]} />
+                    <View style={[styles.cornerBracket, styles.bracketBL, { borderColor: '#10B981' }]} />
+                    <View style={[styles.cornerBracket, styles.bracketBR, { borderColor: '#10B981' }]} />
+                  </View>
+
+                  {/* Bottom Instructions inside Camera */}
+                  <View style={styles.cameraBottomPill}>
+                    <ThemedText style={styles.cameraBottomPillText}>
+                      Alinee el código QR dentro del recuadro
+                    </ThemedText>
+                  </View>
+                </View>
+              )}
             </View>
-            {!isOnline && (
-              <View style={styles.manualOfflineHint}>
-                <Ionicons name="information-circle-outline" size={14} color="#B45309" style={{ marginRight: 6 }} />
-                <ThemedText style={styles.manualOfflineHintText}>
-                  Modo offline activo: Solo coincidirán vehículos consultados previamente en este teléfono.
-                </ThemedText>
+
+            {/* Manual Input Card */}
+            <View style={styles.manualEntryCard}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                <ThemedText style={styles.manualEntryHeading}>Ingresar manualmente</ThemedText>
+                <Ionicons name="keypad-outline" size={18} color="#0D6E5F" />
               </View>
-            )}
-          </View>
-        </ScrollView>
+              <ThemedText style={styles.manualEntryLabel}>Número de Corbatín o Placas</ThemedText>
+              <View style={styles.manualEntryRow}>
+                <TextInput
+                  value={manualCorbatinInput}
+                  onChangeText={setManualCorbatinInput}
+                  placeholder="Ej. 11, C-102 o Placas"
+                  placeholderTextColor="#94a3b8"
+                  style={styles.manualTextInput}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  returnKeyType="search"
+                  onFocus={() => {
+                    setTimeout(() => {
+                      cameraScrollRef.current?.scrollToEnd({ animated: true });
+                    }, 200);
+                  }}
+                  onSubmitEditing={() => {
+                    Keyboard.dismiss();
+                    handleManualSearch();
+                  }}
+                />
+                <Pressable
+                  onPress={() => {
+                    Keyboard.dismiss();
+                    handleManualSearch();
+                  }}
+                  style={({ pressed }) => [
+                    styles.manualSearchButton,
+                    { backgroundColor: '#0D6E5F' },
+                    pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                  ]}
+                >
+                  <Ionicons name="search" size={16} color="#ffffff" style={{ marginRight: 4 }} />
+                  <ThemedText style={[styles.manualSearchButtonText, { color: '#ffffff' }]}>
+                    Buscar
+                  </ThemedText>
+                </Pressable>
+              </View>
+              {!isOnline && (
+                <View style={styles.manualOfflineHint}>
+                  <Ionicons name="information-circle-outline" size={14} color="#B45309" style={{ marginRight: 6 }} />
+                  <ThemedText style={styles.manualOfflineHintText}>
+                    Modo offline activo: Solo coincidirán vehículos consultados previamente en este teléfono.
+                  </ThemedText>
+                </View>
+              )}
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
       )}
 
       {/* ─── 2. LOADING STATE ─── */}
