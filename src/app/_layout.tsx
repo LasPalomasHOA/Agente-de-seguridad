@@ -65,7 +65,7 @@ function DashboardShell() {
           {/* Official Brand Logo & Subtitle */}
           <View style={styles.sidebarBrandSection}>
             <Image
-              source={require('@/assets/images/lp-logo.png')}
+              source={require('@/assets/images/logo.jpeg')}
               style={styles.sidebarLogoImg}
               contentFit="contain"
             />
