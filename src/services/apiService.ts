@@ -482,6 +482,17 @@ export const parseUtcTimestampToLocalTimeStr = (
   return clean;
 };
 
+export const normalizeEstadoReporte = (
+  rawStatus?: string | null
+): 'aprobado' | 'rechazado' | 'borrador' | 'informacion_solicitada' | 'pendiente' => {
+  const s = (rawStatus || '').trim().toLowerCase();
+  if (s === 'aprobado' || s === 'aprobada') return 'aprobado';
+  if (s === 'rechazado' || s === 'rechazada') return 'rechazado';
+  if (s === 'borrador') return 'borrador';
+  if (s === 'informacion_solicitada') return 'informacion_solicitada';
+  return 'pendiente';
+};
+
 export const ApiService = {
   /**
    * Verifica el estado del servidor Express / PostgreSQL
@@ -1512,27 +1523,13 @@ export const ApiService = {
                 id_usuario: params.idUsuario,
                 ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
                 descripcion_hechos: params.descripcionHechos,
-                estatus_revision: 'aprobada',
+                estatus_revision: 'pendiente',
               })
               .select('id_reporte')
               .single();
 
             if (repData && repData.id_reporte) {
               resReporteId = repData.id_reporte;
-              await (supabase as any)
-                .from('sanciones')
-                .insert({
-                  id_reporte: repData.id_reporte,
-                  id_vehiculo: params.idVehiculo,
-                  id_empresa: 1,
-                  id_regla: nuevoNivel <= 4 ? nuevoNivel : 4,
-                  numero_reincidencia: nuevoNivel,
-                  fecha_inicio: fechaInicioSancion.toISOString(),
-                  fecha_fin: fechaFinStr,
-                  estatus: 'activa',
-                  motivo: params.descripcionHechos || 'Infracción reglamentaria',
-                  id_usuario: params.idUsuario,
-                });
             }
           }
 
@@ -1648,7 +1645,7 @@ export const ApiService = {
   },
 
   /**
-   * Comprobación ultraligera (Delta Ping de ~80 bytes) para verificar si hay reportes nuevos
+   * Comprobación ultraligera (Delta Ping) para verificar si hay reportes nuevos
    * o si cambió el estatus de revisión sin descargar la lista completa de reportes ni evidencias.
    */
   async checkReportesDelta(options: {
@@ -1656,8 +1653,11 @@ export const ApiService = {
     currentCount: number;
     latestReportId?: number;
     latestStatus?: string;
+    statusMap?: Record<number, string>;
+    pageLimit?: number;
   }): Promise<{ hasChanges: boolean; totalCount: number; latestId?: number; latestStatus?: string }> {
-    const { idUsuario, currentCount, latestReportId, latestStatus } = options;
+    const { idUsuario, currentCount, latestReportId, latestStatus, statusMap, pageLimit = 30 } = options;
+    const normalizedExpectedLatestStatus = latestStatus ? normalizeEstadoReporte(latestStatus) : undefined;
 
     if (isSupabaseConfigured()) {
       try {
@@ -1665,7 +1665,7 @@ export const ApiService = {
           .from('reportes_infracciones')
           .select('id_reporte, estatus_revision', { count: 'exact' })
           .order('id_reporte', { ascending: false })
-          .limit(1);
+          .limit(pageLimit);
 
         if (idUsuario) {
           query = query.eq('id_usuario', idUsuario);
@@ -1675,15 +1675,33 @@ export const ApiService = {
 
         if (!error) {
           const totalCount = count ?? 0;
-          const latestItem = data && data.length > 0 ? data[0] : null;
+          const rows = Array.isArray(data) ? data : [];
+          const latestItem = rows.length > 0 ? rows[0] : null;
           const dbLatestId = latestItem ? Number(latestItem.id_reporte) : 0;
-          const dbLatestStatus = latestItem ? String(latestItem.estatus_revision || '') : '';
+          const dbLatestStatus = latestItem ? normalizeEstadoReporte(latestItem.estatus_revision) : '';
 
-          const hasCountChange = totalCount !== currentCount;
-          const hasIdChange = latestReportId !== undefined && latestReportId > 0 && dbLatestId !== Number(latestReportId);
-          const hasStatusChange = latestStatus !== undefined && dbLatestStatus !== String(latestStatus);
+          // Comparar contra la ventana paginada real (máximo pageLimit elementos remotos en memoria)
+          const expectedWindowCount = Math.min(totalCount, pageLimit);
+          const hasCountChange = expectedWindowCount !== currentCount;
+          const hasIdChange =
+            latestReportId !== undefined && latestReportId > 0
+              ? dbLatestId !== Number(latestReportId)
+              : dbLatestId > 0;
+          const hasTopStatusChange =
+            normalizedExpectedLatestStatus !== undefined &&
+            dbLatestId > 0 &&
+            dbLatestStatus !== normalizedExpectedLatestStatus;
 
-          const hasChanges = hasCountChange || hasIdChange || hasStatusChange;
+          // Verificar si algún reporte de la ventana actual cambió de estatus (ej. aprobado/rechazado por supervisor)
+          const hasAnyRowStatusChange = statusMap
+            ? rows.some((r: any) => {
+                const rId = Number(r.id_reporte);
+                const prevSt = statusMap[rId];
+                return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
+              })
+            : false;
+
+          const hasChanges = hasCountChange || hasIdChange || hasTopStatusChange || hasAnyRowStatusChange;
 
           return {
             hasChanges,
@@ -1699,18 +1717,33 @@ export const ApiService = {
 
     // Fallback ligero con ETag
     try {
-      const queryParams: string[] = ['limit=1'];
+      const queryParams: string[] = [`limit=${pageLimit}`];
       if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
       const data = await fetchJson(`/reportes?${queryParams.join('&')}`);
       if (Array.isArray(data)) {
         const latest = data[0];
         const dbLatestId = latest ? Number(latest.id_reporte) : 0;
-        const dbLatestStatus = latest ? String(latest.estatus_revision || '') : '';
-        const hasIdChange = latestReportId !== undefined && latestReportId > 0 && dbLatestId !== Number(latestReportId);
-        const hasStatusChange = latestStatus !== undefined && dbLatestStatus !== String(latestStatus);
+        const dbLatestStatus = latest ? normalizeEstadoReporte(latest.estatus_revision) : '';
+        const hasCountChange = data.length !== currentCount;
+        const hasIdChange =
+          latestReportId !== undefined && latestReportId > 0
+            ? dbLatestId !== Number(latestReportId)
+            : dbLatestId > 0;
+        const hasTopStatusChange =
+          normalizedExpectedLatestStatus !== undefined &&
+          dbLatestId > 0 &&
+          dbLatestStatus !== normalizedExpectedLatestStatus;
+        const hasAnyRowStatusChange = statusMap
+          ? data.some((r: any) => {
+              const rId = Number(r.id_reporte);
+              const prevSt = statusMap[rId];
+              return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
+            })
+          : false;
+
         return {
-          hasChanges: hasIdChange || hasStatusChange,
-          totalCount: currentCount,
+          hasChanges: hasCountChange || hasIdChange || hasTopStatusChange || hasAnyRowStatusChange,
+          totalCount: data.length,
           latestId: dbLatestId,
           latestStatus: dbLatestStatus,
         };

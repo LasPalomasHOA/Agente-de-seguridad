@@ -1051,12 +1051,16 @@ export default function ScannerScreen() {
               <View style={styles.suspendedVehicleCard}>
                 <View style={styles.suspendedPhotoCol}>
                   {selectedVehicle.foto_url ? (
-                    <Image
-                      source={{ uri: selectedVehicle.foto_url }}
-                      style={styles.suspendedPhotoImg}
-                      contentFit="cover"
-                      cachePolicy="memory-disk"
-                    />
+                    <Pressable onPress={() => setLightboxPhoto(selectedVehicle.foto_url || null)}>
+                      <View pointerEvents="none">
+                        <Image
+                          source={{ uri: selectedVehicle.foto_url }}
+                          style={styles.suspendedPhotoImg}
+                          contentFit="cover"
+                          cachePolicy="memory-disk"
+                        />
+                      </View>
+                    </Pressable>
                   ) : (
                     <View style={[styles.suspendedPhotoImg, { backgroundColor: '#F1F5F9', alignItems: 'center', justifyContent: 'center' }]}>
                       <Ionicons name="car-outline" size={32} color="#94A3B8" />
@@ -1332,12 +1336,14 @@ export default function ScannerScreen() {
                         pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
                       ]}
                     >
-                      <Image
-                        source={{ uri: selectedVehicle.foto_url }}
-                        style={styles.referencePhotoImg}
-                        contentFit="cover"
-                        cachePolicy="memory-disk"
-                      />
+                      <View pointerEvents="none">
+                        <Image
+                          source={{ uri: selectedVehicle.foto_url }}
+                          style={styles.referencePhotoImg}
+                          contentFit="cover"
+                          cachePolicy="memory-disk"
+                        />
+                      </View>
                       <View style={styles.photoReferenceFooter}>
                         <ThemedText style={styles.photoReferenceLabel}>Foto de Referencia &bull; Tocar para Zoom</ThemedText>
                         <Ionicons name="search" size={14} color="#0D6E5F" />
@@ -1667,8 +1673,16 @@ export default function ScannerScreen() {
                 <View key={index} style={styles.photoSlotBox}>
                   {photo ? (
                     <View style={styles.photoSlotFilled}>
-                      <Image source={{ uri: photo.fotoUrl }} style={styles.photoSlotImg} cachePolicy="memory-disk" />
                       <Pressable
+                        onPress={() => setLightboxPhoto(photo.fotoUrl)}
+                        style={{ width: '100%', height: '100%' }}
+                      >
+                        <View pointerEvents="none" style={{ width: '100%', height: '100%' }}>
+                          <Image source={{ uri: photo.fotoUrl }} style={styles.photoSlotImg} cachePolicy="memory-disk" />
+                        </View>
+                      </Pressable>
+                      <Pressable
+                        hitSlop={8}
                         onPress={() => handleDeletePhoto(photo.id)}
                         style={styles.deletePhotoSlotBtn}
                       >
@@ -1699,7 +1713,8 @@ export default function ScannerScreen() {
             <Pressable
               onPress={async () => {
                 if (selectedVehicle && selectedInfraccion) {
-                  const finalDesc = selectedCategory === 'otro' && otraInfraccionTexto.trim()
+                  const isOtroCat = selectedCategory === 'otros' || selectedCategory === 'otro';
+                  const finalDesc = isOtroCat && otraInfraccionTexto.trim()
                     ? `[${otraInfraccionTexto.trim()}] ${descripcion}`.trim()
                     : (descripcion || 'Borrador guardado.');
 
@@ -1707,19 +1722,19 @@ export default function ScannerScreen() {
                     {
                       vehiculoId: String(selectedVehicle.id_vehiculo),
                       corbatinNumero: selectedCorbatin?.numero ? `C-${selectedCorbatin.numero}` : 'S/C',
-                      infraccionCodigo: selectedCategory === 'otro' ? 'INF-OTRO' : selectedInfraccion.codigo,
+                      infraccionCodigo: selectedInfraccion.codigo || (isOtroCat ? 'INF-07' : 'INF-01'),
                       idVehiculo: Number(selectedVehicle.id_vehiculo),
                       idCorbatin: selectedCorbatin?.id_corbatin && Number(selectedCorbatin.id_corbatin) > 0 ? Number(selectedCorbatin.id_corbatin) : null,
-                      idInfraccion: selectedInfraccion.id_infraccion ? Number(selectedInfraccion.id_infraccion) : 1,
-                      lugar: lugar,
+                      idInfraccion: selectedInfraccion.id_infraccion ? Number(selectedInfraccion.id_infraccion) : 7,
+                      lugar: lugar.trim() || 'No especificada',
                       descripcion: finalDesc,
-                      observaciones: 'Guardado por el oficial.',
+                      observaciones: 'Guardado como borrador por el oficial.',
                       evidencias: evidencias,
                     },
                     'borrador'
                   );
-                  alert('Borrador guardado exitosamente.');
-                  router.replace('/');
+                  alert('Borrador guardado exitosamente. Puedes enviarlo cuando gustes desde la sección de Reportes.');
+                  router.replace('/reports');
                 }
               }}
               style={({ pressed }) => [
@@ -1787,9 +1802,18 @@ export default function ScannerScreen() {
           {/* Summary Card: Evidencias */}
           <View style={styles.reviewCard}>
             <ThemedText style={styles.reviewCardTitle}>Evidencias Adjuntas ({evidencias.length})</ThemedText>
-            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
               {evidencias.map((ev) => (
-                <Image key={ev.id} source={{ uri: ev.fotoUrl }} style={styles.reviewPhotoThumb} cachePolicy="memory-disk" />
+                <Pressable
+                  key={ev.id}
+                  hitSlop={6}
+                  onPress={() => setLightboxPhoto(ev.fotoUrl)}
+                  style={({ pressed }) => [pressed && { opacity: 0.85 }]}
+                >
+                  <View pointerEvents="none">
+                    <Image source={{ uri: ev.fotoUrl }} style={styles.reviewPhotoThumb} cachePolicy="memory-disk" />
+                  </View>
+                </Pressable>
               ))}
             </View>
           </View>
@@ -1926,21 +1950,31 @@ export default function ScannerScreen() {
           <View style={styles.lightboxOverlay}>
             <View style={styles.lightboxCard}>
               <View style={styles.lightboxHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Ionicons name="image-outline" size={20} color="#ffffff" />
-                  <ThemedText style={styles.lightboxTitle}>Inspección Visual del Vehículo</ThemedText>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                  <View style={styles.lightboxIconBadge}>
+                    <Ionicons name="camera" size={18} color="#0D6E5F" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <ThemedText style={styles.lightboxTitle}>Inspección Fotográfica</ThemedText>
+                    <ThemedText style={styles.lightboxSubTitle} numberOfLines={1}>
+                      {selectedCorbatin?.numero ? `Corbatín #${selectedCorbatin.numero} • ` : ''}
+                      {selectedVehicle?.placas || 'Registro HOA'}
+                    </ThemedText>
+                  </View>
                 </View>
                 <Pressable onPress={() => setLightboxPhoto(null)} style={styles.lightboxCloseBtn}>
-                  <Ionicons name="close" size={24} color="#ffffff" />
+                  <Ionicons name="close" size={20} color="#475569" />
                 </Pressable>
               </View>
 
-              <Image
-                source={{ uri: lightboxPhoto }}
-                style={styles.lightboxImg}
-                contentFit="contain"
-                cachePolicy="memory-disk"
-              />
+              <View style={styles.lightboxStageBox}>
+                <Image
+                  source={{ uri: lightboxPhoto }}
+                  style={styles.lightboxImg}
+                  contentFit="contain"
+                  cachePolicy="memory-disk"
+                />
+              </View>
 
               <View style={styles.lightboxFooter}>
                 <ThemedText style={styles.lightboxPlate}>
@@ -1950,6 +1984,13 @@ export default function ScannerScreen() {
                   {selectedEmpresa?.razon_social || 'Empresa Acreditada HOA'}
                 </ThemedText>
               </View>
+
+              <Pressable
+                onPress={() => setLightboxPhoto(null)}
+                style={styles.lightboxPrimaryCloseBtn}
+              >
+                <ThemedText style={styles.lightboxPrimaryCloseText}>Cerrar Vista</ThemedText>
+              </Pressable>
             </View>
           </View>
         </Modal>
@@ -3589,55 +3630,109 @@ const styles = StyleSheet.create({
   },
   lightboxOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.88)',
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 16,
   },
   lightboxCard: {
     width: '100%',
-    maxWidth: 540,
-    backgroundColor: '#0F172A',
+    maxWidth: 480,
+    backgroundColor: '#FFFFFF',
     borderRadius: 20,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: '#E2E8F0',
     gap: 12,
-    padding: 16,
+    padding: 18,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 10,
   },
   lightboxHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+    paddingBottom: 10,
+  },
+  lightboxIconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   lightboxTitle: {
-    fontSize: 15,
+    fontSize: 15.5,
     fontWeight: '900',
-    color: '#ffffff',
+    color: '#0F172A',
+  },
+  lightboxSubTitle: {
+    fontSize: 11.5,
+    color: '#64748B',
+    fontWeight: '600',
+    marginTop: 1,
   },
   lightboxCloseBtn: {
-    padding: 4,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lightboxStageBox: {
+    width: '100%',
+    height: 340,
+    backgroundColor: '#0F172A',
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   lightboxImg: {
     width: '100%',
-    height: 300,
-    borderRadius: 12,
+    height: '100%',
   },
   lightboxFooter: {
-    borderTopWidth: 1,
-    borderTopColor: '#1e293b',
-    paddingTop: 8,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     gap: 2,
   },
   lightboxPlate: {
-    fontSize: 13,
+    fontSize: 12.5,
     fontWeight: '900',
-    color: '#10B981',
+    color: '#0D6E5F',
   },
   lightboxCompany: {
     fontSize: 11,
-    color: '#94A3B8',
+    color: '#64748B',
     fontWeight: '600',
+  },
+  lightboxPrimaryCloseBtn: {
+    backgroundColor: '#0D6E5F',
+    height: 44,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lightboxPrimaryCloseText: {
+    color: '#FFFFFF',
+    fontSize: 13.5,
+    fontWeight: '800',
   },
   historyCardInsideHighlight: {
     borderColor: '#0D6E5F',

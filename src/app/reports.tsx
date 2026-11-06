@@ -25,7 +25,16 @@ import { useSocialRefresh } from '../hooks/use-social-refresh';
 
 export default function ReportsScreen() {
   const router = useRouter();
-  const { reportes, agenteActual, refrescarReportesOptimizado, pendingSyncCount, sincronizarPendientes, isSyncingOffline } = useMobile();
+  const {
+    reportes,
+    agenteActual,
+    refrescarReportesOptimizado,
+    pendingSyncCount,
+    sincronizarPendientes,
+    isSyncingOffline,
+    enviarBorrador,
+    eliminarBorrador,
+  } = useMobile();
   const { width } = useWindowDimensions();
 
   // Responsive Breakpoints
@@ -45,6 +54,7 @@ export default function ReportsScreen() {
   const [selectedReport, setSelectedReport] = useState<ReporteInfraccion | null>(null);
   const [zoomPhoto, setZoomPhoto] = useState<string | null>(null);
   const [loadingPhotos, setLoadingPhotos] = useState(false);
+  const [sendingDraft, setSendingDraft] = useState(false);
 
   // Carga diferida (lazy loading) al abrir el expediente
   const handleOpenReportModal = async (rep: ReporteInfraccion) => {
@@ -92,6 +102,30 @@ export default function ReportsScreen() {
     () => misReportes.filter((r) => r.estado === 'rechazado').length,
     [misReportes]
   );
+  const borradoresCount = useMemo(
+    () => misReportes.filter((r) => r.estado === 'borrador').length,
+    [misReportes]
+  );
+
+  const handleSendDraft = async (rep: ReporteInfraccion) => {
+    setSendingDraft(true);
+    try {
+      const nuevoFolio = await enviarBorrador(rep.id);
+      setSelectedReport(null);
+      alert(`¡Borrador enviado exitosamente con el folio ${nuevoFolio}!`);
+    } catch (e: any) {
+      alert(`No se pudo enviar el borrador: ${e?.message || 'Error desconocido'}`);
+    } finally {
+      setSendingDraft(false);
+    }
+  };
+
+  const handleDeleteDraft = async (rep: ReporteInfraccion) => {
+    try {
+      await eliminarBorrador(rep.id);
+      setSelectedReport(null);
+    } catch { }
+  };
 
   const filtered = useMemo(() => {
     const cleanSearch = searchFolio.toLowerCase().trim();
@@ -274,6 +308,24 @@ export default function ReportsScreen() {
             <ThemedText style={styles.metricChipLabel}>Rechazados</ThemedText>
           </View>
         </Pressable>
+
+        {borradoresCount > 0 && (
+          <Pressable
+            onPress={() => setSelectedStatus('borrador')}
+            style={[
+              styles.metricChip,
+              selectedStatus === 'borrador' && styles.metricChipActive,
+            ]}
+          >
+            <View style={[styles.metricChipIconBox, { backgroundColor: '#F1F5F9' }]}>
+              <Ionicons name="create-outline" size={16} color="#475569" />
+            </View>
+            <View>
+              <ThemedText style={[styles.metricChipCount, { color: '#475569' }]}>{borradoresCount}</ThemedText>
+              <ThemedText style={styles.metricChipLabel}>Borradores</ThemedText>
+            </View>
+          </Pressable>
+        )}
       </View>
 
       {/* ─── FILTERS BAR ─── */}
@@ -307,6 +359,7 @@ export default function ReportsScreen() {
               { id: 'pendiente', label: 'Pendientes' },
               { id: 'aprobado', label: 'Aprobados' },
               { id: 'rechazado', label: 'Rechazados' },
+              { id: 'borrador', label: 'Borradores' },
             ].map((st) => (
               <Pressable
                 key={st.id}
@@ -481,14 +534,29 @@ export default function ReportsScreen() {
                     </View>
                     <View style={styles.thumbMiniList}>
                       {rep.evidencias.slice(0, 3).map((ev) => (
-                        <Image
+                        <Pressable
                           key={ev.id}
-                          recyclingKey={ev.id}
-                          source={{ uri: ev.fotoUrl }}
-                          style={styles.cardMiniPhotoThumb}
-                          cachePolicy="memory-disk"
-                          allowDownscaling={true}
-                        />
+                          hitSlop={6}
+                          onPress={async (e) => {
+                            e.stopPropagation();
+                            if (ev.fotoUrl) {
+                              setZoomPhoto(ev.fotoUrl);
+                            } else {
+                              const foto = await SupabaseService.getEvidenciaFoto(ev.id);
+                              if (foto) setZoomPhoto(foto);
+                            }
+                          }}
+                        >
+                          <View pointerEvents="none">
+                            <Image
+                              recyclingKey={ev.id}
+                              source={{ uri: ev.fotoUrl }}
+                              style={styles.cardMiniPhotoThumb}
+                              cachePolicy="memory-disk"
+                              allowDownscaling={true}
+                            />
+                          </View>
+                        </Pressable>
                       ))}
                     </View>
                   </View>
@@ -519,172 +587,347 @@ export default function ReportsScreen() {
           visible={!!selectedReport}
           transparent
           animationType="fade"
-          onRequestClose={() => setSelectedReport(null)}
+          onRequestClose={() => {
+            if (zoomPhoto) {
+              setZoomPhoto(null);
+            } else {
+              setSelectedReport(null);
+            }
+          }}
         >
           <View style={styles.modalOverlay}>
-            <View style={styles.modalCard}>
-              {/* Modal Header */}
-              <View style={styles.modalHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Ionicons name="document-text" size={22} color="#0D6E5F" />
-                  <View>
-                    <ThemedText style={styles.modalTitle}>Expediente {selectedReport.folio}</ThemedText>
-                    <ThemedText style={styles.modalSubTitle}>
-                      Registrado por {agenteActual?.nombre || 'Oficial en Servicio'}
-                    </ThemedText>
+            {zoomPhoto ? (
+              <View style={styles.modalCard}>
+                {/* Header del visor con la misma estética del expediente */}
+                <View style={styles.modalHeader}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                    <View style={styles.lightboxIconBadge}>
+                      <Ionicons name="camera" size={18} color="#0D6E5F" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <ThemedText style={styles.modalTitle}>Evidencia Fotográfica</ThemedText>
+                      <ThemedText style={styles.modalSubTitle} numberOfLines={1}>
+                        Folio {selectedReport.folio} &bull; {selectedReport.infraccionCodigo}
+                      </ThemedText>
+                    </View>
+                  </View>
+                  <Pressable onPress={() => setZoomPhoto(null)} style={styles.modalCloseIconBtn}>
+                    <Ionicons name="close" size={20} color="#475569" />
+                  </Pressable>
+                </View>
+
+                {/* Marco de imagen con fondo oscuro contenido y bordes redondeados */}
+                <View style={styles.lightboxStageBox}>
+                  <Image
+                    source={{ uri: zoomPhoto }}
+                    style={styles.lightboxStageImage}
+                    contentFit="contain"
+                    cachePolicy="memory-disk"
+                  />
+                  <View style={styles.lightboxStagePill}>
+                    <Ionicons name="shield-checkmark" size={12} color="#10B981" />
+                    <ThemedText style={styles.lightboxStagePillText}>Evidencia Oficial HOA</ThemedText>
                   </View>
                 </View>
-                <Pressable onPress={() => setSelectedReport(null)} style={styles.modalCloseIconBtn}>
-                  <Ionicons name="close" size={22} color="#475569" />
-                </Pressable>
-              </View>
 
-              <ScrollView style={{ maxHeight: 440 }} showsVerticalScrollIndicator={false}>
-                <View style={{ gap: 12, paddingVertical: 8 }}>
-                  {/* Status Banner */}
-                  <View
-                    style={[
-                      styles.modalStatusBanner,
-                      {
-                        backgroundColor:
-                          selectedReport.estado === 'aprobado'
-                            ? '#ECFDF5'
-                            : selectedReport.estado === 'rechazado'
-                              ? '#FEF2F2'
-                              : '#FEF3C7',
-                      },
-                    ]}
+                {/* Franja informativa inferior */}
+                <View style={styles.lightboxMetaStrip}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                    <Ionicons name="location-outline" size={14} color="#0D6E5F" />
+                    <ThemedText style={styles.lightboxMetaText} numberOfLines={1}>
+                      {selectedReport.lugar || 'Zona Residencial'}
+                    </ThemedText>
+                  </View>
+                  <ThemedText style={styles.lightboxMetaDate}>
+                    {selectedReport.fecha} &bull; {selectedReport.hora || '08:30'} hrs
+                  </ThemedText>
+                </View>
+
+                <View style={styles.modalFooterActions}>
+                  <Pressable
+                    onPress={() => setZoomPhoto(null)}
+                    style={[styles.modalCloseButton, { flexDirection: 'row', gap: 6 }]}
                   >
-                    <Ionicons
-                      name={
-                        selectedReport.estado === 'aprobado'
-                          ? 'checkmark-circle'
-                          : selectedReport.estado === 'rechazado'
-                            ? 'close-circle'
-                            : 'time'
-                      }
-                      size={18}
-                      color={
-                        selectedReport.estado === 'aprobado'
-                          ? '#059669'
-                          : selectedReport.estado === 'rechazado'
-                            ? '#DC2626'
-                            : '#D97706'
-                      }
-                      style={{ marginRight: 6 }}
-                    />
-                    <ThemedText
+                    <Ionicons name="arrow-back" size={16} color="#ffffff" />
+                    <ThemedText style={styles.modalCloseButtonText}>Volver al Expediente</ThemedText>
+                  </Pressable>
+                </View>
+              </View>
+            ) : (
+              <View style={styles.modalCard}>
+                {/* Modal Header */}
+                <View style={styles.modalHeader}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Ionicons name="document-text" size={22} color="#0D6E5F" />
+                    <View>
+                      <ThemedText style={styles.modalTitle}>Expediente {selectedReport.folio}</ThemedText>
+                      <ThemedText style={styles.modalSubTitle}>
+                        Registrado por {agenteActual?.nombre || 'Oficial en Servicio'}
+                      </ThemedText>
+                    </View>
+                  </View>
+                  <Pressable onPress={() => setSelectedReport(null)} style={styles.modalCloseIconBtn}>
+                    <Ionicons name="close" size={22} color="#475569" />
+                  </Pressable>
+                </View>
+
+                <ScrollView
+                  style={{ maxHeight: 440 }}
+                  showsVerticalScrollIndicator={false}
+                  keyboardShouldPersistTaps="handled"
+                >
+                  <View style={{ gap: 12, paddingVertical: 8 }}>
+                    {/* Status Banner */}
+                    <View
                       style={[
-                        styles.modalStatusBannerText,
+                        styles.modalStatusBanner,
                         {
-                          color:
+                          backgroundColor:
                             selectedReport.estado === 'aprobado'
-                              ? '#059669'
+                              ? '#ECFDF5'
                               : selectedReport.estado === 'rechazado'
-                                ? '#DC2626'
-                                : '#D97706',
+                                ? '#FEF2F2'
+                                : selectedReport.estado === 'borrador'
+                                  ? '#F1F5F9'
+                                  : '#FEF3C7',
                         },
                       ]}
                     >
-                      ESTADO: {selectedReport.estado?.toUpperCase() || 'PENDIENTE'}
-                    </ThemedText>
-                  </View>
-
-                  {/* Detail Grid */}
-                  <View style={styles.modalInfoGrid}>
-                    <View style={styles.modalInfoBox}>
-                      <ThemedText style={styles.modalInfoLabel}>CÓDIGO DE INFRACCIÓN</ThemedText>
-                      <ThemedText style={styles.modalInfoValueBold}>{selectedReport.infraccionCodigo}</ThemedText>
-                    </View>
-                    <View style={styles.modalInfoBox}>
-                      <ThemedText style={styles.modalInfoLabel}>CORBATÍN ASIGNADO</ThemedText>
-                      <ThemedText style={styles.modalInfoValueBold}>
-                        {(() => {
-                          if (!selectedReport.corbatinNumero || selectedReport.corbatinNumero === 'S/C') return 'S/C';
-                          const digits = selectedReport.corbatinNumero.replace(/\D/g, '');
-                          if (!digits) return selectedReport.corbatinNumero;
-                          const cleanNum = digits.startsWith('2026') && digits.length > 4 ? digits.slice(4) : digits;
-                          return `Corbatín #${cleanNum ? parseInt(cleanNum, 10) : selectedReport.corbatinNumero}`;
-                        })()}
+                      <Ionicons
+                        name={
+                          selectedReport.estado === 'aprobado'
+                            ? 'checkmark-circle'
+                            : selectedReport.estado === 'rechazado'
+                              ? 'close-circle'
+                              : selectedReport.estado === 'borrador'
+                                ? 'create'
+                                : 'time'
+                        }
+                        size={18}
+                        color={
+                          selectedReport.estado === 'aprobado'
+                            ? '#059669'
+                            : selectedReport.estado === 'rechazado'
+                              ? '#DC2626'
+                              : selectedReport.estado === 'borrador'
+                                ? '#475569'
+                                : '#D97706'
+                        }
+                        style={{ marginRight: 6 }}
+                      />
+                      <ThemedText
+                        style={[
+                          styles.modalStatusBannerText,
+                          {
+                            color:
+                              selectedReport.estado === 'aprobado'
+                                ? '#059669'
+                                : selectedReport.estado === 'rechazado'
+                                  ? '#DC2626'
+                                  : selectedReport.estado === 'borrador'
+                                    ? '#475569'
+                                    : '#D97706',
+                          },
+                        ]}
+                      >
+                        ESTADO: {selectedReport.estado?.toUpperCase() || 'PENDIENTE'}
                       </ThemedText>
                     </View>
-                  </View>
 
-                  <View style={styles.modalInfoBox}>
-                    <ThemedText style={styles.modalInfoLabel}>UBICACIÓN DEL INCIDENTE</ThemedText>
-                    <ThemedText style={styles.modalInfoValue}>{selectedReport.lugar}</ThemedText>
-                  </View>
+                    {/* Detail Grid */}
+                    <View style={styles.modalInfoGrid}>
+                      <View style={styles.modalInfoBox}>
+                        <ThemedText style={styles.modalInfoLabel}>CÓDIGO DE INFRACCIÓN</ThemedText>
+                        <ThemedText style={styles.modalInfoValueBold}>{selectedReport.infraccionCodigo}</ThemedText>
+                      </View>
+                      <View style={styles.modalInfoBox}>
+                        <ThemedText style={styles.modalInfoLabel}>CORBATÍN ASIGNADO</ThemedText>
+                        <ThemedText style={styles.modalInfoValueBold}>
+                          {(() => {
+                            if (!selectedReport.corbatinNumero || selectedReport.corbatinNumero === 'S/C') return 'S/C';
+                            const digits = selectedReport.corbatinNumero.replace(/\D/g, '');
+                            if (!digits) return selectedReport.corbatinNumero;
+                            const cleanNum = digits.startsWith('2026') && digits.length > 4 ? digits.slice(4) : digits;
+                            return `Corbatín #${cleanNum ? parseInt(cleanNum, 10) : selectedReport.corbatinNumero}`;
+                          })()}
+                        </ThemedText>
+                      </View>
+                    </View>
 
-                  <View style={styles.modalInfoBox}>
-                    <ThemedText style={styles.modalInfoLabel}>OBSERVACIONES DE CAMPO</ThemedText>
-                    <ThemedText style={styles.modalInfoValue}>{selectedReport.descripcion}</ThemedText>
-                  </View>
-
-                  <View style={styles.modalInfoBox}>
-                    <ThemedText style={styles.modalInfoLabel}>FECHA Y HORA DE REGISTRO</ThemedText>
-                    <ThemedText style={styles.modalInfoValue}>
-                      📅 {selectedReport.fecha} &bull; ⏰ {selectedReport.hora || '08:30'} hrs
-                    </ThemedText>
-                  </View>
-
-                  {/* Evidencias Grid con indicador de carga y zoom */}
-                  {selectedReport.evidencias && selectedReport.evidencias.length > 0 && (
                     <View style={styles.modalInfoBox}>
-                      <ThemedText style={styles.modalInfoLabel}>
-                        EVIDENCIAS FOTOGRÁFICAS ({selectedReport.evidencias.length}) - TOCAR PARA ZOOM
-                      </ThemedText>
+                      <ThemedText style={styles.modalInfoLabel}>UBICACIÓN DEL INCIDENTE</ThemedText>
+                      <ThemedText style={styles.modalInfoValue}>{selectedReport.lugar}</ThemedText>
+                    </View>
 
-                      {loadingPhotos ? (
-                        <View style={{ paddingVertical: 18, alignItems: 'center', justifyContent: 'center' }}>
-                          <ActivityIndicator size="small" color="#0D6E5F" />
-                          <ThemedText style={{ fontSize: 11, color: '#64748B', marginTop: 4 }}>
-                            Cargando fotografías...
-                          </ThemedText>
-                        </View>
-                      ) : (
-                        <View style={styles.modalPhotosGrid}>
-                          {selectedReport.evidencias.map((ev) =>
-                            ev.fotoUrl ? (
-                              <Pressable key={ev.id} onPress={() => setZoomPhoto(ev.fotoUrl)}>
-                                <Image
+                    <View style={styles.modalInfoBox}>
+                      <ThemedText style={styles.modalInfoLabel}>OBSERVACIONES DE CAMPO</ThemedText>
+                      <ThemedText style={styles.modalInfoValue}>{selectedReport.descripcion}</ThemedText>
+                    </View>
+
+                    <View style={styles.modalInfoBox}>
+                      <ThemedText style={styles.modalInfoLabel}>FECHA Y HORA DE REGISTRO</ThemedText>
+                      <ThemedText style={styles.modalInfoValue}>
+                        📅 {selectedReport.fecha} &bull; ⏰ {selectedReport.hora || '08:30'} hrs
+                      </ThemedText>
+                    </View>
+
+                    {/* Evidencias Grid con indicador de carga y zoom */}
+                    {selectedReport.evidencias && selectedReport.evidencias.length > 0 && (
+                      <View style={styles.modalInfoBox}>
+                        <ThemedText style={styles.modalInfoLabel}>
+                          EVIDENCIAS FOTOGRÁFICAS ({selectedReport.evidencias.length}) - TOCAR PARA AMPLIAR
+                        </ThemedText>
+
+                        {loadingPhotos ? (
+                          <View style={{ paddingVertical: 18, alignItems: 'center', justifyContent: 'center' }}>
+                            <ActivityIndicator size="small" color="#0D6E5F" />
+                            <ThemedText style={{ fontSize: 11, color: '#64748B', marginTop: 4 }}>
+                              Cargando fotografías...
+                            </ThemedText>
+                          </View>
+                        ) : (
+                          <View style={styles.modalPhotosGrid}>
+                            {selectedReport.evidencias.map((ev) =>
+                              ev.fotoUrl ? (
+                                <Pressable
                                   key={ev.id}
-                                  recyclingKey={ev.id}
-                                  source={{ uri: ev.fotoUrl }}
-                                  style={styles.modalPhotoThumbLarge}
-                                  cachePolicy="memory-disk"
-                                  allowDownscaling={true}
-                                />
-                              </Pressable>
-                            ) : null
-                          )}
-                        </View>
-                      )}
+                                  hitSlop={8}
+                                  onPress={() => setZoomPhoto(ev.fotoUrl)}
+                                  style={({ pressed }) => [
+                                    styles.modalPhotoThumbWrapper,
+                                    pressed && { opacity: 0.8, transform: [{ scale: 0.96 }] },
+                                  ]}
+                                >
+                                  <View pointerEvents="none">
+                                    <Image
+                                      recyclingKey={ev.id}
+                                      source={{ uri: ev.fotoUrl }}
+                                      style={styles.modalPhotoThumbLarge}
+                                      cachePolicy="memory-disk"
+                                      allowDownscaling={true}
+                                    />
+                                    <View style={styles.zoomCornerBadge}>
+                                      <Ionicons name="expand" size={12} color="#ffffff" />
+                                    </View>
+                                  </View>
+                                </Pressable>
+                              ) : null
+                            )}
+                          </View>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                </ScrollView>
+
+                <View style={styles.modalFooterActions}>
+                  {selectedReport.estado === 'borrador' ? (
+                    <View style={{ gap: 8 }}>
+                      <Pressable
+                        onPress={() => handleSendDraft(selectedReport)}
+                        disabled={sendingDraft}
+                        style={[
+                          styles.modalCloseButton,
+                          { backgroundColor: '#F59E0B', flexDirection: 'row', gap: 6 },
+                          sendingDraft && { opacity: 0.6 },
+                        ]}
+                      >
+                        {sendingDraft ? (
+                          <ActivityIndicator size="small" color="#0f172a" />
+                        ) : (
+                          <>
+                            <Ionicons name="cloud-upload" size={16} color="#0f172a" />
+                            <ThemedText style={[styles.modalCloseButtonText, { color: '#0f172a' }]}>
+                              Enviar Borrador al HOA
+                            </ThemedText>
+                          </>
+                        )}
+                      </Pressable>
+
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <Pressable
+                          onPress={() => handleDeleteDraft(selectedReport)}
+                          disabled={sendingDraft}
+                          style={[
+                            styles.modalCloseButton,
+                            {
+                              flex: 1,
+                              backgroundColor: '#FEF2F2',
+                              borderWidth: 1,
+                              borderColor: '#FECACA',
+                              flexDirection: 'row',
+                              gap: 4,
+                            },
+                          ]}
+                        >
+                          <Ionicons name="trash-outline" size={15} color="#DC2626" />
+                          <ThemedText style={[styles.modalCloseButtonText, { color: '#DC2626' }]}>
+                            Descartar
+                          </ThemedText>
+                        </Pressable>
+
+                        <Pressable
+                          onPress={() => setSelectedReport(null)}
+                          style={[styles.modalCloseButton, { flex: 1 }]}
+                        >
+                          <ThemedText style={styles.modalCloseButtonText}>Cerrar</ThemedText>
+                        </Pressable>
+                      </View>
                     </View>
+                  ) : (
+                    <Pressable
+                      onPress={() => setSelectedReport(null)}
+                      style={styles.modalCloseButton}
+                    >
+                      <ThemedText style={styles.modalCloseButtonText}>Cerrar Expediente</ThemedText>
+                    </Pressable>
                   )}
                 </View>
-              </ScrollView>
-
-              <View style={styles.modalFooterActions}>
-                <Pressable
-                  onPress={() => setSelectedReport(null)}
-                  style={styles.modalCloseButton}
-                >
-                  <ThemedText style={styles.modalCloseButtonText}>Cerrar Expediente</ThemedText>
-                </Pressable>
               </View>
-            </View>
+            )}
           </View>
         </Modal>
       )}
 
-      {/* ─── LIGHTBOX PHOTO ZOOM MODAL ─── */}
-      {zoomPhoto && (
-        <Modal visible={!!zoomPhoto} transparent animationType="fade" onRequestClose={() => setZoomPhoto(null)}>
-          <View style={styles.lightboxOverlay}>
-            <Pressable onPress={() => setZoomPhoto(null)} style={styles.lightboxCloseBtn}>
-              <Ionicons name="close" size={28} color="#ffffff" />
-            </Pressable>
-            <Image source={{ uri: zoomPhoto }} style={styles.lightboxImage} contentFit="contain" cachePolicy="memory-disk" />
+      {/* ─── LIGHTBOX STANDALONE (CUANDO SE TOCA MINIATURA DIRECTO EN LA TARJETA) ─── */}
+      {zoomPhoto && !selectedReport && (
+        <Modal visible={true} transparent animationType="fade" onRequestClose={() => setZoomPhoto(null)}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                  <View style={styles.lightboxIconBadge}>
+                    <Ionicons name="camera" size={18} color="#0D6E5F" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <ThemedText style={styles.modalTitle}>Evidencia Fotográfica</ThemedText>
+                    <ThemedText style={styles.modalSubTitle}>Inspección visual de campo</ThemedText>
+                  </View>
+                </View>
+                <Pressable onPress={() => setZoomPhoto(null)} style={styles.modalCloseIconBtn}>
+                  <Ionicons name="close" size={20} color="#475569" />
+                </Pressable>
+              </View>
+
+              <View style={styles.lightboxStageBox}>
+                <Image
+                  source={{ uri: zoomPhoto }}
+                  style={styles.lightboxStageImage}
+                  contentFit="contain"
+                  cachePolicy="memory-disk"
+                />
+                <View style={styles.lightboxStagePill}>
+                  <Ionicons name="shield-checkmark" size={12} color="#10B981" />
+                  <ThemedText style={styles.lightboxStagePillText}>Evidencia Oficial HOA</ThemedText>
+                </View>
+              </View>
+
+              <View style={styles.modalFooterActions}>
+                <Pressable onPress={() => setZoomPhoto(null)} style={styles.modalCloseButton}>
+                  <ThemedText style={styles.modalCloseButtonText}>Cerrar Vista</ThemedText>
+                </Pressable>
+              </View>
+            </View>
           </View>
         </Modal>
       )}
@@ -1228,6 +1471,19 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 6,
   },
+  modalPhotoThumbWrapper: {
+    position: 'relative',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  zoomCornerBadge: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    borderRadius: 6,
+    padding: 3,
+  },
   modalPhotoThumbLarge: {
     width: 84,
     height: 84,
@@ -1252,22 +1508,72 @@ const styles = StyleSheet.create({
     fontSize: 13.5,
     fontWeight: '800',
   },
-  lightboxOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.92)',
+  lightboxIconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 20,
   },
-  lightboxCloseBtn: {
-    position: 'absolute',
-    top: 40,
-    right: 20,
-    zIndex: 50,
-    padding: 8,
-  },
-  lightboxImage: {
+  lightboxStageBox: {
     width: '100%',
-    height: '80%',
+    height: 360,
+    backgroundColor: '#0F172A',
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  lightboxStageImage: {
+    width: '100%',
+    height: '100%',
+  },
+  lightboxStagePill: {
+    position: 'absolute',
+    bottom: 10,
+    right: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(15, 23, 42, 0.82)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  lightboxStagePillText: {
+    color: '#F8FAFC',
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
+  lightboxMetaStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  lightboxMetaText: {
+    fontSize: 12,
+    color: '#334155',
+    fontWeight: '600',
+    flex: 1,
+  },
+  lightboxMetaDate: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '700',
   },
 });

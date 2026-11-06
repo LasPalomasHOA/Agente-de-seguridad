@@ -5,6 +5,7 @@ import { ReporteInfraccion } from '../types/reporte';
 
 export const PENDING_REPORTS_KEY = 'hoa_offline_pending_reports';
 export const CACHED_REPORTS_KEY = 'hoa_offline_cached_reports';
+export const DRAFT_REPORTS_KEY = 'hoa_local_draft_reports';
 
 export interface PendingReportPayload {
   tempId: string;
@@ -21,6 +22,8 @@ export interface PendingReportPayload {
   };
   reporteCompleto: ReporteInfraccion;
 }
+
+export type DraftReportPayload = PendingReportPayload;
 
 export interface SyncResult {
   syncedCount: number;
@@ -158,6 +161,48 @@ export async function getCachedReports(): Promise<ReporteInfraccion[]> {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * Obtiene los borradores guardados localmente en el dispositivo
+ */
+export async function getDraftReports(): Promise<DraftReportPayload[]> {
+  try {
+    const raw = await AsyncStorage.getItem(DRAFT_REPORTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn('[OfflineSync] Error leyendo borradores locales:', err);
+    return [];
+  }
+}
+
+/**
+ * Guarda un borrador de reporte localmente en disco (sin enviarlo al servidor)
+ */
+export async function saveDraftReport(payload: DraftReportPayload): Promise<void> {
+  try {
+    const existing = await getDraftReports();
+    const filtered = existing.filter((d) => d.tempId !== payload.tempId);
+    filtered.unshift(payload);
+    await AsyncStorage.setItem(DRAFT_REPORTS_KEY, JSON.stringify(filtered));
+  } catch (err) {
+    console.warn('[OfflineSync] Error guardando borrador local:', err);
+  }
+}
+
+/**
+ * Elimina un borrador local una vez que fue enviado o descartado
+ */
+export async function removeDraftReport(draftId: string): Promise<void> {
+  try {
+    const existing = await getDraftReports();
+    const filtered = existing.filter((d) => d.tempId !== draftId);
+    await AsyncStorage.setItem(DRAFT_REPORTS_KEY, JSON.stringify(filtered));
+  } catch (err) {
+    console.warn('[OfflineSync] Error eliminando borrador local:', err);
   }
 }
 

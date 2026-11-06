@@ -10,6 +10,9 @@ import {
   getPendingReports,
   saveCachedReports,
   getCachedReports,
+  getDraftReports,
+  saveDraftReport,
+  removeDraftReport,
   syncPendingReports,
   setupNetworkRestorationListener,
   subscribeToPendingCount,
@@ -17,7 +20,7 @@ import {
   subscribeToNetworkState,
   SyncResult,
 } from '../services/offlineSyncService';
-import { safeStorage } from '../services/apiService';
+import { safeStorage, getLocalDateStr } from '../services/apiService';
 
 const computeTurno = (): string => {
   const hour = new Date().getHours();
@@ -89,6 +92,8 @@ interface MobileContextType {
     },
     estado?: 'pendiente' | 'borrador'
   ) => Promise<string>;
+  enviarBorrador: (draftId: string) => Promise<string>;
+  eliminarBorrador: (draftId: string) => Promise<void>;
   actualizarReporte: (reporte: ReporteInfraccion) => void;
 }
 
@@ -129,16 +134,25 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         ? idUsuario
         : (currentAgenteId ? parseInt(currentAgenteId.replace(/\D/g, ''), 10) : undefined);
 
-      const [dbReportes, pendingOffline] = await Promise.all([
+      const [dbReportes, pendingOffline, draftLocal] = await Promise.all([
         SupabaseService.getReportes({
           idUsuario: targetUserId && !isNaN(targetUserId) ? targetUserId : undefined,
           limit: 30,
           forceRefresh,
         }).catch(() => null),
         getPendingReports(),
+        getDraftReports(),
       ]);
 
       setPendingSyncCount(pendingOffline.length);
+
+      const draftReportObjects: ReporteInfraccion[] = draftLocal
+        .filter((d) => !targetUserId || Number(d.params.idUsuario) === targetUserId)
+        .map((d) => ({
+          ...d.reporteCompleto,
+          estado: 'borrador',
+          isOfflinePending: false,
+        }));
 
       const pendingReportObjects: ReporteInfraccion[] = pendingOffline
         .filter((p) => !targetUserId || Number(p.params.idUsuario) === targetUserId)
@@ -156,6 +170,8 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             ? 'rechazado'
             : statusLower === 'borrador'
             ? 'borrador'
+            : statusLower === 'informacion_solicitada'
+            ? 'informacion_solicitada'
             : 'pendiente';
 
           const corbRel = Array.isArray(r.corbatines) ? r.corbatines[0] : r.corbatines;
@@ -178,7 +194,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             corbatinNumero: corbatinNumeroStr,
             infraccionCodigo: r.infraccion?.codigo || r.catalogo_infracciones?.codigo || infRel?.codigo || 'INF-01',
             lugar: r.ubicacion_texto || 'Área Común',
-            fecha: (r.fecha_hora || '').split('T')[0] || new Date().toISOString().split('T')[0],
+            fecha: (r.fecha_hora || '').split('T')[0] || getLocalDateStr(),
             hora: (r.fecha_hora || '').split('T')[1]?.substring(0, 5) || '12:00',
             descripcion: r.descripcion_hechos || '',
             observaciones: r.ubicacion_texto,
@@ -196,24 +212,29 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           };
         });
 
-        // Fusión protegida: reportes offline pendientes van al inicio y no son eliminados
-        const combined = [...pendingReportObjects, ...mapped];
+        // Fusión protegida: borradores locales y reportes offline pendientes van al inicio y no son eliminados
+        const combined = [...draftReportObjects, ...pendingReportObjects, ...mapped];
         setReportes(combined);
         await saveCachedReports(combined);
         return;
-      } else if (pendingReportObjects.length > 0) {
-        setReportes(pendingReportObjects);
+      } else if (draftReportObjects.length > 0 || pendingReportObjects.length > 0) {
+        const localOnly = [...draftReportObjects, ...pendingReportObjects];
+        setReportes(localOnly);
+        await saveCachedReports(localOnly);
         return;
       }
     } catch (err) {
       console.warn('[MobileContext] Error cargando reportes remotos, recurriendo a caché local:', err);
       // Fallback a almacenamiento offline en disco
-      const [cached, pendingOffline] = await Promise.all([
+      const [cached, pendingOffline, draftLocal] = await Promise.all([
         getCachedReports(),
         getPendingReports(),
+        getDraftReports(),
       ]);
+      const draftObjects = draftLocal.map((d) => ({ ...d.reporteCompleto, estado: 'borrador' as const, isOfflinePending: false }));
       const pendingObjects = pendingOffline.map((p) => ({ ...p.reporteCompleto, isOfflinePending: true }));
-      const combined = [...pendingObjects, ...cached.filter((c) => !pendingObjects.some((p) => p.id === c.id))];
+      const localIds = new Set([...draftObjects.map((d) => d.id), ...pendingObjects.map((p) => p.id)]);
+      const combined = [...draftObjects, ...pendingObjects, ...cached.filter((c) => !localIds.has(c.id))];
       if (combined.length > 0) {
         setReportes(combined);
       }
@@ -265,32 +286,39 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const validUserId = targetUserId && !isNaN(targetUserId) ? targetUserId : undefined;
 
       const currentList = reportes || [];
-      const currentCount = currentList.length;
+      // Filtrar únicamente los reportes que provienen de la base de datos remota (excluir borradores locales y pendientes offline)
+      const remoteList = currentList.filter(
+        (r) => !r.isOfflinePending && r.estado !== 'borrador' && (r.id || '').startsWith('rep_')
+      );
+      const currentRemoteCount = remoteList.length;
 
       let latestReportId: number | undefined;
       let latestStatus: string | undefined;
+      const statusMap: Record<number, string> = {};
 
-      if (currentList.length > 0) {
-        const topRep = currentList.find((r) => !r.isOfflinePending);
-        if (topRep) {
-          const numId = parseInt((topRep.id || '').replace(/\D/g, ''), 10);
-          if (!isNaN(numId)) {
+      for (const rep of remoteList) {
+        const numId = parseInt((rep.id || '').replace(/\D/g, ''), 10);
+        if (!isNaN(numId) && numId > 0) {
+          statusMap[numId] = rep.estado;
+          if (latestReportId === undefined) {
             latestReportId = numId;
+            latestStatus = rep.estado;
           }
-          latestStatus = topRep.estado;
         }
       }
 
-      // 2. Verificación delta ultraligera (~80 bytes)
+      // 2. Verificación delta ultraligera contra la ventana paginada real
       const delta = await SupabaseService.checkReportesDelta({
         idUsuario: validUserId,
-        currentCount,
+        currentCount: currentRemoteCount,
         latestReportId,
         latestStatus,
+        statusMap,
+        pageLimit: 30,
       });
 
       if (!delta.hasChanges && !hadOfflineSync) {
-        return { hasChanges: false, totalCount: currentCount };
+        return { hasChanges: false, totalCount: currentList.length };
       }
 
       // 3. Si se detectaron cambios reales o se subieron reportes offline, recargar
@@ -444,7 +472,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   ): Promise<string> => {
     const now = new Date();
     const folioNum = Math.floor(1000 + Math.random() * 9000);
-    const dateStr = now.toISOString().split('T')[0];
+    const dateStr = getLocalDateStr(now);
     const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
 
     let vehIdNum = nuevo.idVehiculo;
@@ -485,6 +513,48 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       evidenciasUrls: nuevo.evidencias.map((e) => e.fotoUrl),
     };
 
+    // Si es borrador, guardarlo únicamente en el dispositivo local sin enviarlo al servidor
+    if (estado === 'borrador') {
+      const draftId = `draft_${Date.now()}`;
+      const draftFolio = `F-2026-BORR-${folioNum}`;
+
+      const borradorCompleto: ReporteInfraccion = {
+        ...nuevo,
+        id: draftId,
+        folio: draftFolio,
+        fecha: dateStr,
+        hora: timeStr,
+        estado: 'borrador',
+        agenteId: agenteActual.id,
+        isOfflinePending: false,
+        historial: [
+          {
+            id: `hist_${Date.now()}`,
+            fecha: now.toISOString(),
+            estado: 'borrador',
+            detalles: 'Reporte guardado localmente como borrador.',
+            usuarioNombre: agenteActual.nombre,
+          },
+        ],
+      };
+
+      await saveDraftReport({
+        tempId: draftId,
+        tempFolio: draftFolio,
+        createdAt: now.toISOString(),
+        params: payloadParams,
+        reporteCompleto: borradorCompleto,
+      });
+
+      setReportes((prev) => {
+        const updated = [borradorCompleto, ...prev];
+        saveCachedReports(updated);
+        return updated;
+      });
+
+      return borradorCompleto.folio;
+    }
+
     let dbReporteId: number | null = null;
     const isOnline = await isNetworkConnected();
 
@@ -511,17 +581,15 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       folio: finalFolio,
       fecha: dateStr,
       hora: timeStr,
-      estado: estado,
+      estado: 'pendiente',
       agenteId: agenteActual.id,
-      isOfflinePending: isOffline && estado !== 'borrador',
+      isOfflinePending: isOffline,
       historial: [
         {
           id: `hist_${Date.now()}`,
           fecha: now.toISOString(),
-          estado: estado,
-          detalles: estado === 'borrador'
-            ? 'Reporte guardado como borrador.'
-            : isOffline
+          estado: 'pendiente',
+          detalles: isOffline
             ? 'Reporte guardado localmente (sin internet). Se subirá al restablecerse la conexión.'
             : 'Reporte enviado a revisión de HOA.',
           usuarioNombre: agenteActual.nombre,
@@ -530,7 +598,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
 
     // Guardar en cola persistente si es un reporte que debe subirse al servidor
-    if (isOffline && estado !== 'borrador') {
+    if (isOffline) {
       await queueReportForSync({
         tempId: finalId,
         tempFolio: finalFolio,
@@ -548,6 +616,84 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     return completo.folio;
   }, [agenteActual, catalogoInfracciones]);
+
+  const enviarBorrador = useCallback(async (draftId: string): Promise<string> => {
+    const drafts = await getDraftReports();
+    const targetDraft = drafts.find((d) => d.tempId === draftId);
+
+    if (!targetDraft) {
+      throw new Error('No se encontró el borrador especificado.');
+    }
+
+    const now = new Date();
+    const folioNum = Math.floor(1000 + Math.random() * 9000);
+    let dbReporteId: number | null = null;
+    const online = await isNetworkConnected();
+
+    if (online) {
+      try {
+        const dbRes = await SupabaseService.crearReporteInfraccion(targetDraft.params);
+        if (dbRes?.idReporte) {
+          dbReporteId = dbRes.idReporte;
+        }
+      } catch (e) {
+        console.warn('[MobileContext] Error enviando borrador al servidor:', e);
+      }
+    }
+
+    const isOffline = !dbReporteId;
+    const finalId = dbReporteId ? `rep_${dbReporteId}` : `pending_${Date.now()}`;
+    const finalFolio = dbReporteId ? `F-2026-${String(dbReporteId).padStart(4, '0')}` : `F-2026-PEND-${folioNum}`;
+
+    const actualizado: ReporteInfraccion = {
+      ...targetDraft.reporteCompleto,
+      id: finalId,
+      folio: finalFolio,
+      estado: 'pendiente',
+      isOfflinePending: isOffline,
+      historial: [
+        ...(targetDraft.reporteCompleto.historial || []),
+        {
+          id: `hist_${Date.now()}`,
+          fecha: now.toISOString(),
+          estado: 'pendiente',
+          detalles: isOffline
+            ? 'Borrador confirmado sin conexión. En cola para sincronizar con el HOA.'
+            : 'Borrador enviado a revisión de HOA.',
+          usuarioNombre: agenteActual.nombre,
+        },
+      ],
+    };
+
+    await removeDraftReport(draftId);
+
+    if (isOffline) {
+      await queueReportForSync({
+        tempId: finalId,
+        tempFolio: finalFolio,
+        createdAt: now.toISOString(),
+        params: targetDraft.params,
+        reporteCompleto: actualizado,
+      });
+    }
+
+    setReportes((prev) => {
+      const updated = prev.map((r) => (r.id === draftId ? actualizado : r));
+      saveCachedReports(updated);
+      return updated;
+    });
+
+    return finalFolio;
+  }, [agenteActual.nombre]);
+
+  const eliminarBorrador = useCallback(async (draftId: string): Promise<void> => {
+    await removeDraftReport(draftId);
+    setReportes((prev) => {
+      const updated = prev.filter((r) => r.id !== draftId);
+      saveCachedReports(updated);
+      return updated;
+    });
+  }, []);
 
   const actualizarReporte = useCallback((reporte: ReporteInfraccion) => {
     setReportes((prev) => {
@@ -576,6 +722,8 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       sincronizarPendientes,
       cargarCatalogo,
       agregarReporte,
+      enviarBorrador,
+      eliminarBorrador,
       actualizarReporte,
     }),
     [
@@ -596,6 +744,8 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       sincronizarPendientes,
       cargarCatalogo,
       agregarReporte,
+      enviarBorrador,
+      eliminarBorrador,
       actualizarReporte,
     ]
   );
