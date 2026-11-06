@@ -27,7 +27,7 @@
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/logo.jpeg"
+      "favicon": "./assets/images/logo-hoa.jpeg"
     },
     "plugins": [
       "expo-router",
