@@ -21,6 +21,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { ReporteInfraccion } from '../types/reporte';
 import { Evidencia } from '../types/evidencia';
 import { SupabaseService } from '../services/supabaseService';
+import { getLocalDateStr } from '../services/apiService';
 import { SocialSyncPill } from '@/components/social-sync-pill';
 import { useSocialRefresh } from '../hooks/use-social-refresh';
 
@@ -125,7 +126,7 @@ export default function HomeDashboard() {
     [reportes, agenteActual.id]
   );
 
-  const todayIso = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const todayIso = useMemo(() => getLocalDateStr(new Date()), []);
 
   const reportesHoyCount = useMemo(
     () => misReportes.filter((r) => (r.fecha || (r as any).created_at || '').startsWith(todayIso)).length,

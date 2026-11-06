@@ -20,7 +20,7 @@ import {
   subscribeToNetworkState,
   SyncResult,
 } from '../services/offlineSyncService';
-import { safeStorage, getLocalDateStr } from '../services/apiService';
+import { safeStorage, getLocalDateStr, getLocalDateTimeFromUtc } from '../services/apiService';
 
 const computeTurno = (): string => {
   const hour = new Date().getHours();
@@ -187,6 +187,8 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             ? `C-${resolvedNumero}`
             : (r.id_corbatin ? `C-${r.id_corbatin}` : 'S/C');
 
+          const localDt = getLocalDateTimeFromUtc(r.fecha_hora || r.created_at);
+
           return {
             id: `rep_${r.id_reporte}`,
             folio: `F-2026-${String(r.id_reporte).padStart(4, '0')}`,
@@ -194,8 +196,8 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             corbatinNumero: corbatinNumeroStr,
             infraccionCodigo: r.infraccion?.codigo || r.catalogo_infracciones?.codigo || infRel?.codigo || 'INF-01',
             lugar: r.ubicacion_texto || 'Área Común',
-            fecha: (r.fecha_hora || '').split('T')[0] || getLocalDateStr(),
-            hora: (r.fecha_hora || '').split('T')[1]?.substring(0, 5) || '12:00',
+            fecha: localDt.fecha,
+            hora: localDt.hora,
             descripcion: r.descripcion_hechos || '',
             observaciones: r.ubicacion_texto,
             agenteId: String(r.id_usuario),

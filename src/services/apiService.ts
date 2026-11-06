@@ -458,6 +458,76 @@ export const getLocalTimeStr = (d = new Date()): string => {
   return `${hours}:${minutes}:${seconds}`;
 };
 
+export const parseSqlUtcDate = (dateStr?: string | null): number => {
+  if (!dateStr || typeof dateStr !== 'string') return Date.now();
+  let clean = dateStr.trim();
+  if (!clean || clean === 'null' || clean === 'undefined') return Date.now();
+
+  // Si es una fecha pura YYYY-MM-DD sin hora, interpretarla en medianoche local
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    const [y, m, d] = clean.split('-').map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+  }
+
+  // 1. Si viene con espacio entre fecha y hora (ej: "2026-09-15 12:27:45.272-07" o "2026-09-15 19:27:45"), normalizar espacio a 'T'
+  if (clean.includes(' ') && clean.includes('-')) {
+    clean = clean.replace(' ', 'T');
+  }
+
+  // 2. Si el offset de zona horaria es de 2 dígitos sin minutos (ej: "-07" o "+00" al final), normalizar a "-07:00" o "+00:00"
+  clean = clean.replace(/([+-]\d{2})$/, '$1:00');
+
+  // 3. Si no trae zona horaria explícita (+HH:MM, -HH:MM ni Z), los timestamps de SQL/PostgreSQL representan UTC, por lo que agregamos 'Z'
+  if (!clean.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(clean)) {
+    clean = clean + 'Z';
+  }
+
+  // 4. Intentar parseo estándar con ISO 8601 normalizado
+  const ms = new Date(clean).getTime();
+  if (!isNaN(ms)) {
+    return ms;
+  }
+
+  return Date.now();
+};
+
+export const getLocalDateTimeFromUtc = (
+  utcStr?: string | null,
+  fallbackDateStr?: string | null
+): { fecha: string; hora: string } => {
+  if (utcStr && typeof utcStr === 'string') {
+    const clean = utcStr.trim();
+    if (clean && clean !== 'null' && clean !== 'undefined') {
+      if (clean.includes('T') || (clean.includes('-') && clean.includes(':'))) {
+        const d = new Date(parseSqlUtcDate(clean));
+        if (!isNaN(d.getTime())) {
+          return {
+            fecha: getLocalDateStr(d),
+            hora: getLocalTimeStr(d).substring(0, 5),
+          };
+        }
+      }
+      const timeMatch = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      if (timeMatch) {
+        let hour = parseInt(timeMatch[1], 10);
+        const min = timeMatch[2];
+        if (timeMatch[3] !== undefined) {
+          hour = (hour - 7 + 24) % 24;
+        }
+        return {
+          fecha: fallbackDateStr || getLocalDateStr(),
+          hora: `${String(hour).padStart(2, '0')}:${min}`,
+        };
+      }
+    }
+  }
+  const now = new Date();
+  return {
+    fecha: fallbackDateStr || getLocalDateStr(now),
+    hora: getLocalTimeStr(now).substring(0, 5),
+  };
+};
+
 export const parseUtcTimestampToLocalTimeStr = (
   isoTimestamp?: string | null,
   fallbackTimeStr?: string | null
@@ -467,7 +537,14 @@ export const parseUtcTimestampToLocalTimeStr = (
   const clean = val.trim();
   if (!clean || clean === 'null' || clean === 'undefined') return null;
 
-  // Extraer hora y minutos de cualquier formato UTC (TIMESTAMP WITH TIME ZONE, TIME puro, ISO)
+  if (clean.includes('T') || (clean.includes('-') && clean.includes(':'))) {
+    const d = new Date(parseSqlUtcDate(clean));
+    if (!isNaN(d.getTime())) {
+      return getLocalTimeStr(d);
+    }
+  }
+
+  // Extraer hora y minutos de formato TIME puro en UTC
   const match = clean.match(/(?:T|\s|^)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
   if (match) {
     const utcHour = parseInt(match[1], 10);
@@ -856,26 +933,37 @@ export const ApiService = {
       for (const key of aliasKeys) {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
         if (cachedResult && (cachedResult.vehiculo || cachedResult.corbatin)) {
-          // Consultar en vivo el último acceso y las sanciones activas (respetando TTL_SANCIONES de 30s)
+          // Consultar en vivo el último acceso y las sanciones activas (forzando refresh para reflejar aprobaciones inmediatas)
           try {
             const [liveAcceso, liveSanciones] = await Promise.all([
               cachedResult.vehiculo?.id_vehiculo
                 ? this.getUltimoAcceso(
                     cachedResult.vehiculo.id_vehiculo,
-                    cachedResult.corbatin?.id_corbatin
+                    cachedResult.corbatin?.id_corbatin,
+                    true
                   ).catch(() => null)
                 : Promise.resolve(null),
               cachedResult.vehiculo?.id_vehiculo
-                ? this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: false }).catch(() => [])
+                ? this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: true }).catch(() => [])
                 : Promise.resolve([]),
             ]);
 
             cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
             if (Array.isArray(liveSanciones)) {
+              const validStatuses = new Set([
+                'activa',
+                'activo',
+                'ratificada',
+                'en_apelacion',
+                'programada',
+                'permanente',
+              ]);
               cachedResult.sancionesActivas = liveSanciones
-                .filter((s: any) => s.estatus === 'ACTIVA' || s.estatus === 'activa' || s.estatus === 'activo')
+                .filter((s: any) => validStatuses.has((s.estatus || 'activa').toString().trim().toLowerCase()))
                 .map((s: any) => ({
                   ...s,
+                  id_regla: s.id_regla || s.numero_reincidencia || 1,
+                  numero_reincidencia: s.numero_reincidencia || s.id_regla || 1,
                   estatus: (s.estatus?.toLowerCase() as any) || 'activa',
                 }));
             }
@@ -1155,37 +1243,37 @@ export const ApiService = {
 
       const hasVehicle = Boolean(vehiculoRow.id_vehiculo && Number(vehiculoRow.id_vehiculo) > 0);
 
-      // Sanciones, conteo de infracciones y último acceso vehicular en paralelo sin redundancia
+      // Sanciones, conteo de infracciones y último acceso vehicular en paralelo (siempre consultando getSanciones en vivo para incluir sanciones recién aprobadas)
       const [todasSanciones, totalInfracciones, ultimoAcceso] = await Promise.all([
-        matchedVehiculo?.sanciones && Array.isArray(matchedVehiculo.sanciones)
-          ? Promise.resolve(matchedVehiculo.sanciones)
-          : (hasVehicle
-              ? this.getSanciones({ idVehiculo: Number(vehiculoRow.id_vehiculo) })
-              : Promise.resolve([])),
+        hasVehicle
+          ? this.getSanciones({ idVehiculo: Number(vehiculoRow.id_vehiculo), forceRefresh: true }).catch(() => matchedVehiculo?.sanciones || [])
+          : Promise.resolve(matchedVehiculo?.sanciones || []),
         typeof matchedVehiculo?.infracciones_count === 'number'
           ? Promise.resolve(matchedVehiculo.infracciones_count)
           : (hasVehicle
               ? this.getReportesCount({ idVehiculo: Number(vehiculoRow.id_vehiculo) })
               : Promise.resolve(0)),
-        hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin) : Promise.resolve(null),
+        hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin, true) : Promise.resolve(null),
+      ]);
+
+      const validActiveStatuses = new Set([
+        'activa',
+        'activo',
+        'ratificada',
+        'en_apelacion',
+        'programada',
+        'permanente',
       ]);
 
       const sancionesActivas = (todasSanciones || [])
-        .filter(
-          (s: any) =>
-            s.estatus === 'ACTIVA' ||
-            s.estatus === 'activa' ||
-            s.estatus === 'activo' ||
-            s.estatus === 'RATIFICADA' ||
-            s.estatus === 'ratificada'
-        )
+        .filter((s: any) => validActiveStatuses.has((s.estatus || 'activa').toString().trim().toLowerCase()))
         .map((s: any) => ({
           id_sancion: s.id_sancion,
           id_reporte: s.id_reporte || 1,
           id_vehiculo: s.id_vehiculo,
           id_empresa: s.id_empresa,
-          id_regla: s.id_regla || 1,
-          numero_reincidencia: s.numero_reincidencia || 1,
+          id_regla: s.id_regla || s.numero_reincidencia || 1,
+          numero_reincidencia: s.numero_reincidencia || s.id_regla || 1,
           fecha_inicio: s.fecha_inicio || new Date().toISOString(),
           fecha_fin: s.fecha_fin || null,
           estatus: (s.estatus?.toLowerCase() as any) || 'activa',
@@ -1838,19 +1926,43 @@ export const ApiService = {
   /**
    * Obtiene el último registro de acceso para un vehículo o corbatín en particular
    */
-  async getUltimoAcceso(idVehiculo?: number | null, idCorbatin?: number | null): Promise<BitacoraAccesoRow | null> {
+  async getUltimoAcceso(
+    idVehiculo?: number | null,
+    idCorbatin?: number | null,
+    forceRefresh = false
+  ): Promise<BitacoraAccesoRow | null> {
     const vId = idVehiculo ? Number(idVehiculo) : null;
     const cId = idCorbatin ? Number(idCorbatin) : null;
     if (!vId && !cId) return null;
 
     const cacheKey = vId ? `ultimo_acceso_veh_${vId}` : `ultimo_acceso_corb_${cId}`;
-    const cached = apiCache.get<BitacoraAccesoRow>(cacheKey, 45 * 1000);
-    if (cached !== null && cached !== undefined) {
-      if ((vId && Number(cached.id_vehiculo) === vId) || (cId && Number(cached.id_corbatin) === cId)) {
-        return cached;
+    if (!forceRefresh) {
+      const cached = apiCache.get<BitacoraAccesoRow>(cacheKey, 45 * 1000);
+      if (cached !== null && cached !== undefined) {
+        if ((vId && Number(cached.id_vehiculo) === vId) || (cId && Number(cached.id_corbatin) === cId)) {
+          return cached;
+        }
+        apiCache.invalidate(cacheKey);
       }
-      apiCache.invalidate(cacheKey);
     }
+
+    const resolveLocalFechaForAcceso = (row: any): string => {
+      const refTs =
+        (row.hora_salida && row.hora_salida !== 'null' ? row.hora_salida : null) ||
+        (row.hora_entrada && row.hora_entrada !== 'null' ? row.hora_entrada : null) ||
+        row.updated_at ||
+        row.created_at;
+      if (refTs && typeof refTs === 'string' && (refTs.includes('T') || (refTs.includes('-') && refTs.includes(':')))) {
+        const d = new Date(parseSqlUtcDate(refTs));
+        if (!isNaN(d.getTime())) {
+          return getLocalDateStr(d);
+        }
+      }
+      if (row.fecha && typeof row.fecha === 'string') {
+        return row.fecha.split('T')[0];
+      }
+      return getLocalDateStr();
+    };
 
     // 1. Almacenamiento local en memoria reciente
     let localAcceso: BitacoraAccesoRow | null = null;
@@ -1880,7 +1992,7 @@ export const ApiService = {
           id_corbatin: matchedRow.id_corbatin || null,
           id_conductor: matchedRow.id_conductor || null,
           id_usuario: matchedRow.id_usuario || 1,
-          fecha: matchedRow.fecha || (matchedRow.created_at || '').split('T')[0] || getLocalDateStr(),
+          fecha: resolveLocalFechaForAcceso(matchedRow),
           hora_entrada: matchedRow.hora_entrada && matchedRow.hora_entrada !== 'null' ? matchedRow.hora_entrada : (matchedRow.created_at || null),
           hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
             ? (matchedRow.hora_salida && matchedRow.hora_salida !== 'null' ? matchedRow.hora_salida : (matchedRow.updated_at || matchedRow.created_at || null))
@@ -1925,7 +2037,7 @@ export const ApiService = {
               id_corbatin: matchedRow.id_corbatin || null,
               id_conductor: matchedRow.id_conductor || null,
               id_usuario: matchedRow.id_usuario || 1,
-              fecha: matchedRow.fecha || (matchedRow.created_at || '').split('T')[0] || getLocalDateStr(),
+              fecha: resolveLocalFechaForAcceso(matchedRow),
               hora_entrada: matchedRow.hora_entrada && matchedRow.hora_entrada !== 'null' ? matchedRow.hora_entrada : (matchedRow.created_at || null),
               hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
                 ? (matchedRow.hora_salida && matchedRow.hora_salida !== 'null' ? matchedRow.hora_salida : (matchedRow.updated_at || matchedRow.created_at || null))
@@ -2136,22 +2248,39 @@ export const ApiService = {
       }
     }
 
-    // 2. Intentar actualizar en Express Backend mediante POST /bitacora
+    // 2. Intentar actualizar en Express Backend mediante PUT /bitacora/:id/salida o POST /bitacora
     try {
-      await fetchJson('/bitacora', {
-        method: 'POST',
-        body: JSON.stringify({
-          id_acceso: params.idAcceso || null,
-          id_caseta: params.idCaseta || 1,
-          id_vehiculo: params.idVehiculo,
-          id_corbatin: params.idCorbatin || null,
-          id_usuario: params.idUsuario,
-          fecha: fechaStr,
-          hora_salida: utcIsoStr,
-          estatus_acceso: 'SALIDA',
-          observaciones: params.observaciones || 'Salida registrada en caseta.',
-        }),
-      });
+      let updatedViaPut = false;
+      if (params.idAcceso && params.idAcceso > 0 && params.idAcceso < 1000000000000) {
+        try {
+          await fetchJson(`/bitacora/${params.idAcceso}/salida`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              hora_salida: utcIsoStr,
+              observaciones: params.observaciones || 'Salida registrada en caseta.',
+            }),
+          });
+          updatedViaPut = true;
+        } catch {
+          updatedViaPut = false;
+        }
+      }
+      if (!updatedViaPut) {
+        await fetchJson('/bitacora', {
+          method: 'POST',
+          body: JSON.stringify({
+            id_acceso: params.idAcceso || null,
+            id_caseta: params.idCaseta || 1,
+            id_vehiculo: params.idVehiculo,
+            id_corbatin: params.idCorbatin || null,
+            id_usuario: params.idUsuario,
+            fecha: fechaStr,
+            hora_salida: utcIsoStr,
+            estatus_acceso: 'SALIDA',
+            observaciones: params.observaciones || 'Salida registrada en caseta.',
+          }),
+        });
+      }
     } catch { }
 
     // 3. Fallback en Supabase (un solo salto de red sin SELECTs previos)
@@ -2318,7 +2447,7 @@ export const ApiService = {
   },
 
   /**
-   * Obtiene sanciones con soporte para filtrado por vehículo y proyección ligera
+   * Obtiene sanciones con soporte para filtrado por vehículo, cálculo exacto de reincidencia y proyección ligera
    */
   async getSanciones(
     options?: { idVehiculo?: number; forceRefresh?: boolean } | number
@@ -2338,34 +2467,156 @@ export const ApiService = {
     }
 
     const cacheKey = `sanciones_list_${idVehiculo || 'all'}`;
+    if (forceRefresh) {
+      apiCache.invalidate(cacheKey);
+      httpEtagCache.delete(`/sanciones?id_vehiculo=${idVehiculo}&limit=50`);
+      httpEtagCache.delete(`/sanciones?id_vehiculo=${idVehiculo}&estatus=activa&limit=10`);
+    }
+
+    const normalizeAndComputeReincidencias = (rawRows: any[], approvedReportsCount = 0): any[] => {
+      if (!Array.isArray(rawRows) || rawRows.length === 0) return [];
+
+      // Filtrar por vehículo si aplica
+      const vehicleRows = idVehiculo
+        ? rawRows.filter((s: any) => Number(s.id_vehiculo) === Number(idVehiculo))
+        : rawRows;
+
+      // Descartar únicamente sanciones canceladas o levantadas definitivamente en oficina
+      const validRows = vehicleRows.filter((s: any) => {
+        const est = (s.estatus || '').toString().trim().toUpperCase();
+        if (est === 'CANCELADA' || est === 'CANCELADO' || est === 'ACLARADA' || est === 'ACLARADO') {
+          return false;
+        }
+        const rawMotivo = s.motivo || '';
+        const resIdx = rawMotivo.indexOf('[RESOLUCION_OFICINA_DATA]');
+        if (resIdx !== -1) {
+          try {
+            const jsonPart = rawMotivo.substring(resIdx + '[RESOLUCION_OFICINA_DATA]'.length).split(/\[[A-Z_]+\]/)[0].trim();
+            const parsedRes = JSON.parse(jsonPart);
+            if (parsedRes.tipo_resolucion === 'levantamiento_definitivo') {
+              return false;
+            }
+            if (parsedRes.tipo_resolucion === 'permiso_temporal' && parsedRes.permiso_temporal_hasta) {
+              const expDate = new Date(parsedRes.permiso_temporal_hasta);
+              if (new Date() < expDate) {
+                return false;
+              }
+            }
+          } catch { }
+        }
+        return true;
+      });
+
+      // Ordenar cronológicamente (menor id_sancion primero) para calcular el nivel real de reincidencia (1ª, 2ª, 3ª, 4ª)
+      const chronological = [...validRows].sort(
+        (a, b) => Number(a.id_sancion || 0) - Number(b.id_sancion || 0)
+      );
+
+      const enriched = chronological.map((s: any, idx: number) => {
+        let cleanMotivo = s.motivo || 'Falta al reglamento';
+        for (const tag of ['[APELACION_DATA]', '[DICTAMEN_DATA]', '[RESOLUCION_OFICINA_DATA]']) {
+          const tagIdx = cleanMotivo.indexOf(tag);
+          if (tagIdx !== -1) {
+            cleanMotivo = cleanMotivo.substring(0, tagIdx).trim();
+          }
+        }
+
+        const storedNivel = Math.max(Number(s.numero_reincidencia) || 1, Number(s.id_regla) || 1);
+        const chronologicalNivel = idx + 1;
+        // Si es la última sanción registrada y existen más reportes aprobados para este vehículo, reflejar el conteo real
+        const isLast = idx === chronological.length - 1;
+        const effectiveCount = isLast
+          ? Math.max(storedNivel, chronologicalNivel, approvedReportsCount)
+          : Math.max(storedNivel, chronologicalNivel);
+        const finalNivel = Math.min(Math.max(effectiveCount, 1), 4);
+
+        return {
+          ...s,
+          motivo: cleanMotivo || 'Falta al reglamento',
+          id_regla: finalNivel,
+          numero_reincidencia: finalNivel,
+        };
+      });
+
+      // Retornar más recientes y de mayor nivel primero
+      return enriched.sort(
+        (a, b) =>
+          (Number(b.numero_reincidencia) || 1) - (Number(a.numero_reincidencia) || 1) ||
+          Number(b.id_sancion || 0) - Number(a.id_sancion || 0)
+      );
+    };
 
     return apiCache.getOrFetch(
       cacheKey,
       TTL_SANCIONES,
       async () => {
+        let supabaseRows: any[] = [];
+        let approvedReportsCount = 0;
+
+        // 1. Si Supabase está configurado, consultar directamente la tabla sanciones (sin filtrar estatus='activa' para contar reincidencias exactas) y el conteo de reportes aprobados
+        if (isSupabaseConfigured() && idVehiculo) {
+          try {
+            const [sancRes, repRes] = await Promise.all([
+              (supabase as any)
+                .from('sanciones' as any)
+                .select(PROJECTIONS.SANCIONES_LIGHT)
+                .eq('id_vehiculo', idVehiculo)
+                .order('id_sancion', { ascending: true })
+                .limit(50),
+              (supabase as any)
+                .from('reportes_infracciones' as any)
+                .select('id_reporte, estatus_revision')
+                .eq('id_vehiculo', idVehiculo)
+                .in('estatus_revision', ['APROBADO', 'aprobado', 'APROBADA', 'aprobada']),
+            ]);
+
+            if (sancRes?.data && Array.isArray(sancRes.data)) {
+              supabaseRows = sancRes.data;
+            }
+            if (repRes?.data && Array.isArray(repRes.data)) {
+              approvedReportsCount = repRes.data.length;
+            }
+          } catch { }
+        }
+
+        // 2. Consultar también Express Backend (y combinar resultados para nunca perder sanciones recién creadas)
         try {
-          const queryParam = idVehiculo ? `?id_vehiculo=${idVehiculo}&estatus=activa&limit=10` : '?estatus=activa&limit=10';
+          const queryParam = idVehiculo
+            ? `?id_vehiculo=${idVehiculo}&limit=50`
+            : '?estatus=activa&limit=20';
           const data = await fetchJson(`/sanciones${queryParam}`);
           if (Array.isArray(data)) {
-            if (idVehiculo) {
-              return data.filter((s: any) => Number(s.id_vehiculo) === Number(idVehiculo));
+            if (supabaseRows.length > 0) {
+              const mergedMap = new Map<number, any>();
+              for (const row of data) {
+                if (row?.id_sancion) mergedMap.set(Number(row.id_sancion), row);
+              }
+              for (const row of supabaseRows) {
+                if (row?.id_sancion) mergedMap.set(Number(row.id_sancion), { ...mergedMap.get(Number(row.id_sancion)), ...row });
+              }
+              return normalizeAndComputeReincidencias(Array.from(mergedMap.values()), approvedReportsCount);
             }
-            return data;
+            return normalizeAndComputeReincidencias(data, approvedReportsCount);
           }
-        } catch {
-          if (isSupabaseConfigured()) {
-            let query = (supabase as any)
+        } catch { }
+
+        if (supabaseRows.length > 0) {
+          return normalizeAndComputeReincidencias(supabaseRows, approvedReportsCount);
+        }
+
+        if (isSupabaseConfigured() && !idVehiculo) {
+          try {
+            const { data } = await (supabase as any)
               .from('sanciones' as any)
               .select(PROJECTIONS.SANCIONES_LIGHT)
-              .in('estatus', ['activa', 'ACTIVA', 'activo', 'RATIFICADA', 'ratificada'])
-              .limit(10);
-            if (idVehiculo) query = query.eq('id_vehiculo', idVehiculo);
-            const { data } = await query;
+              .order('id_sancion', { ascending: false })
+              .limit(20);
             if (data && Array.isArray(data)) {
-              return data;
+              return normalizeAndComputeReincidencias(data, 0);
             }
-          }
+          } catch { }
         }
+
         return [];
       },
       forceRefresh

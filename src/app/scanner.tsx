@@ -23,6 +23,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
 import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
+import { getLocalDateStr, getLocalTimeStr } from '../services/apiService';
 import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow, BitacoraAccesoRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
 import { comprimirImagen } from '../services/imageService';
@@ -46,14 +47,23 @@ const INFRACTION_CATEGORIES = [
   { id: 'otros', name: 'Otros', icon: 'create-outline', defaultCode: 'INF-07' },
 ];
 
-const formatHora = (timeStr?: string | null): string | null => {
-  if (!timeStr || typeof timeStr !== 'string') return null;
+const formatHora = (timeStr?: string | null, fallbackIso?: string | null): string | null => {
+  if (!timeStr || typeof timeStr !== 'string') {
+    if (fallbackIso && typeof fallbackIso === 'string') {
+      const ms = parseSqlUtcDate(fallbackIso);
+      const d = new Date(ms);
+      if (!isNaN(d.getTime())) {
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      }
+    }
+    return null;
+  }
   const clean = timeStr.trim();
   if (!clean || clean === 'null' || clean === 'undefined') return null;
 
-  // 1. Si es un ISO String UTC completo (ej: "2026-09-14T19:48:00.000Z")
-  if (clean.includes('T') || clean.endsWith('Z')) {
-    const d = new Date(clean);
+  // 1. Si contiene fecha completa (ISO con 'T', o timestamp SQL con guiones y dos puntos), parsear siempre como UTC a hora local
+  if (clean.includes('T') || clean.endsWith('Z') || (clean.includes('-') && clean.includes(':'))) {
+    const d = new Date(parseSqlUtcDate(clean));
     if (!isNaN(d.getTime())) {
       const hh = String(d.getHours()).padStart(2, '0');
       const mm = String(d.getMinutes()).padStart(2, '0');
@@ -61,27 +71,24 @@ const formatHora = (timeStr?: string | null): string | null => {
     }
   }
 
-  // 2. Si viene como timestamp SQL con espacio (ej: "2026-09-14 19:48:00")
-  if (clean.includes('-') && clean.includes(' ')) {
-    const d = new Date(clean.replace(' ', 'T') + 'Z');
-    if (!isNaN(d.getTime())) {
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      return `${hh}:${mm}`;
-    }
-  }
-
-  // 3. Si viene únicamente como formato TIME ("19:48:00" o "12:48:00")
-  const match = clean.match(/^(\d{1,2}):(\d{2})/);
+  // 2. Si viene únicamente como formato TIME ("06:53:00" o "19:48:00" o "12:48")
+  const match = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
   if (match) {
+    // Si tenemos el timestamp ISO de respaldo (created_at / updated_at), extraer la hora local exacta de ahí
+    if (fallbackIso && typeof fallbackIso === 'string' && (fallbackIso.includes('T') || fallbackIso.includes('-'))) {
+      const d = new Date(parseSqlUtcDate(fallbackIso));
+      if (!isNaN(d.getTime())) {
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      }
+    }
+
     let hour = parseInt(match[1], 10);
     const min = match[2];
+    const hasSeconds = match[3] !== undefined;
 
-    // Si la hora viene inflada en UTC (ej: 19 o más tarde) respecto a la hora local actual
-    const currentLocalHour = new Date().getHours();
-    if (hour - currentLocalHour >= 5) {
-      hour = hour - 7;
-      if (hour < 0) hour += 24;
+    // Las columnas TIME de PostgreSQL/Supabase vienen con segundos ("HH:MM:SS") en UTC -> restar 7h (Sonora UTC-7)
+    if (hasSeconds) {
+      hour = (hour - 7 + 24) % 24;
     }
 
     return `${String(hour).padStart(2, '0')}:${min}`;
@@ -94,6 +101,18 @@ const formatFecha = (dateStr?: string | null): string => {
   if (!dateStr || typeof dateStr !== 'string') return '';
   const clean = dateStr.trim();
   if (!clean || clean === 'null' || clean === 'undefined') return '';
+
+  // Si es un timestamp con hora (UTC), convertir primero a fecha local antes de formatear dd/mm/yyyy
+  if (clean.includes('T') || (clean.includes('-') && clean.includes(':'))) {
+    const d = new Date(parseSqlUtcDate(clean));
+    if (!isNaN(d.getTime())) {
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      return `${day}/${month}/${year}`;
+    }
+  }
+
   const datePart = clean.includes('T') ? clean.split('T')[0] : (clean.includes(' ') ? clean.split(' ')[0] : clean);
   const parts = datePart.split('-');
   if (parts.length === 3) {
@@ -107,6 +126,12 @@ export const parseSqlUtcDate = (dateStr?: string | null): number => {
   if (!dateStr || typeof dateStr !== 'string') return Date.now();
   let clean = dateStr.trim();
   if (!clean || clean === 'null' || clean === 'undefined') return Date.now();
+
+  // Si es una fecha pura YYYY-MM-DD sin hora, interpretarla en medianoche local
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    const [y, m, d] = clean.split('-').map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+  }
 
   // 1. Si viene con espacio entre fecha y hora (ej: "2026-09-15 12:27:45.272-07" o "2026-09-15 19:27:45"), normalizar espacio a 'T'
   if (clean.includes(' ') && clean.includes('-')) {
@@ -171,8 +196,8 @@ export default function ScannerScreen() {
   const [selectedCategory, setSelectedCategory] = useState<string>('seguridad');
   const [selectedInfraccion, setSelectedInfraccion] = useState<CatalogoInfraccionRow | null>(() => catalogoInfracciones[0] || null);
   const [lugar, setLugar] = useState('');
-  const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
-  const [hora, setHora] = useState(new Date().toTimeString().split(' ')[0].substring(0, 5));
+  const [fecha, setFecha] = useState(() => getLocalDateStr());
+  const [hora, setHora] = useState(() => getLocalTimeStr().substring(0, 5));
   const [descripcion, setDescripcion] = useState('');
   const [otraInfraccionTexto, setOtraInfraccionTexto] = useState('');
 
@@ -203,18 +228,23 @@ export default function ScannerScreen() {
 
   const isAccesoToday = React.useMemo(() => {
     if (!ultimoAcceso) return false;
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const todayStr = `${year}-${month}-${day}`;
+    const todayStr = getLocalDateStr(new Date());
 
-    const fechaStr =
-      ultimoAcceso.fecha ||
-      (ultimoAcceso.created_at ? ultimoAcceso.created_at.split('T')[0] : '');
+    // Priorizar el timestamp real del evento (salida o entrada) convertido a zona horaria local
+    const refTs =
+      ultimoAcceso.hora_salida ||
+      ultimoAcceso.hora_entrada ||
+      ultimoAcceso.updated_at ||
+      ultimoAcceso.created_at;
 
+    if (refTs && typeof refTs === 'string' && (refTs.includes('T') || (refTs.includes('-') && refTs.includes(':')))) {
+      const eventLocalDate = getLocalDateStr(new Date(parseSqlUtcDate(refTs)));
+      return eventLocalDate === todayStr;
+    }
+
+    const fechaStr = ultimoAcceso.fecha || '';
     return !!fechaStr && fechaStr.startsWith(todayStr);
-  }, [ultimoAcceso]);
+  }, [ultimoAcceso, nowTick]);
 
   // Un vehículo permanece dentro del complejo desde que ingresa hasta que el oficial en caseta marque su salida manualmente,
   // sin importar que transcurra la medianoche o pasen días (toda salida debe ser registrada manualmente en caseta).
@@ -232,12 +262,12 @@ export default function ScannerScreen() {
     // 1. Intentar cálculo real multidiario basado en timestamps absolutos
     let entryMs: number | null = null;
     const rawEntry = ultimoAcceso.hora_entrada.trim();
-    if (rawEntry.includes('T') || (rawEntry.includes('-') && rawEntry.includes(' '))) {
+    if (rawEntry.includes('T') || (rawEntry.includes('-') && rawEntry.includes(':'))) {
       entryMs = parseSqlUtcDate(rawEntry);
-    } else if (ultimoAcceso.fecha && /^\d{4}-\d{2}-\d{2}$/.test(ultimoAcceso.fecha)) {
-      entryMs = parseSqlUtcDate(`${ultimoAcceso.fecha}T${rawEntry}`);
     } else if (ultimoAcceso.created_at) {
       entryMs = parseSqlUtcDate(ultimoAcceso.created_at);
+    } else if (ultimoAcceso.fecha && /^\d{4}-\d{2}-\d{2}$/.test(ultimoAcceso.fecha)) {
+      entryMs = parseSqlUtcDate(`${ultimoAcceso.fecha}T${rawEntry}`);
     }
 
     if (entryMs && !isNaN(entryMs)) {
@@ -310,7 +340,15 @@ export default function ScannerScreen() {
           duracion: tiempoEstancia || 'Estancia concluida',
         });
         setUltimoAcceso((prev) =>
-          prev ? { ...prev, hora_salida: res.horaSalida, estatus_acceso: 'salida' } : null
+          prev
+            ? {
+                ...prev,
+                fecha: getLocalDateStr(),
+                hora_salida: res.horaSalida,
+                updated_at: res.horaSalida,
+                estatus_acceso: 'salida',
+              }
+            : null
         );
       } else {
         alert('No se pudo registrar la salida. Intente de nuevo.');
@@ -484,6 +522,8 @@ export default function ScannerScreen() {
       activo: true,
     };
     setSelectedInfraccion(defaultInf);
+    setFecha(getLocalDateStr());
+    setHora(getLocalTimeStr().substring(0, 5));
     setLugar('');
     setDescripcion('');
     setEvidencias([]);
@@ -638,15 +678,12 @@ export default function ScannerScreen() {
     const estatusCorbatin = (selectedCorbatin?.estatus || '').toLowerCase();
     const ahoraMs = nowTick;
 
-    // Filtrar únicamente las sanciones que YA entraron en vigor (ahoraMs >= fechaInicioMs)
-    // y que no han expirado. Todas las sanciones (1ª, 2ª, 3ª y 4ª) inician al día siguiente
-    // a las 12:00 AM (hora local) de haber sido aceptadas por el supervisor.
+    // Filtrar sanciones activas que no hayan expirado.
+    // NOTA: No se descartan las sanciones con fecha_inicio programada a la medianoche siguiente (ahoraMs < inicioMs)
+    // para que toda sanción aprobada por supervisión se refleje de inmediato al escanear el vehículo.
     const sancionesEnVigor = (sancionesActivas || []).filter((s) => {
       const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
       const inicioMs = parseSqlUtcDate(s.fecha_inicio || (s as any).created_at);
-      if (ahoraMs < inicioMs) {
-        return false; // Aún no entra en vigor (se refleja hasta el día siguiente a las 12:00 AM hora local)
-      }
       if (nivelS === 2) {
         const finMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : inicioMs + 24 * 60 * 60 * 1000;
         return ahoraMs < finMs;
@@ -655,7 +692,7 @@ export default function ScannerScreen() {
         const finMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : inicioMs + 7 * 24 * 60 * 60 * 1000;
         return ahoraMs < finMs;
       }
-      if (s.fecha_fin) {
+      if (s.fecha_fin && nivelS < 4) {
         const finMs = parseSqlUtcDate(s.fecha_fin);
         if (ahoraMs >= finMs) return false;
       }
@@ -691,11 +728,17 @@ export default function ScannerScreen() {
       return null;
     }
 
-    // Tomar la sanción en vigor más relevante (mayor nivel o más reciente)
+    // Tomar la sanción en vigor más relevante (mayor nivel de reincidencia y más reciente)
     const sancion = [...sancionesEnVigor].sort(
-      (a, b) => (Number(b.numero_reincidencia) || Number(b.id_regla) || 1) - (Number(a.numero_reincidencia) || Number(a.id_regla) || 1)
+      (a, b) =>
+        (Number(b.numero_reincidencia) || Number(b.id_regla) || 1) -
+          (Number(a.numero_reincidencia) || Number(a.id_regla) || 1) ||
+        Number(b.id_sancion || 0) - Number(a.id_sancion || 0)
     )[0];
-    const nivel = Number(sancion.numero_reincidencia) || Number(sancion.id_regla) || 1;
+    const nivel = Math.max(
+      Number(sancion.numero_reincidencia) || 1,
+      Number(sancion.id_regla) || 1
+    );
     const fechaInicioMs = parseSqlUtcDate(sancion.fecha_inicio || (sancion as any).created_at);
 
     // ─── 1ª FALTA: Llamado de atención (Banner amarillo informativo, acceso permitido) ───
@@ -720,7 +763,8 @@ export default function ScannerScreen() {
       const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 24 * 60 * 60 * 1000;
 
       if (ahoraMs < fechaFinMs) {
-        const diffMs = fechaFinMs - ahoraMs;
+        const refStartMs = Math.max(ahoraMs, fechaInicioMs);
+        const diffMs = Math.max(0, fechaFinMs - refStartMs);
         const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
         const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
         const timeRemainingText =
@@ -753,7 +797,8 @@ export default function ScannerScreen() {
       const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
 
       if (ahoraMs < fechaFinMs) {
-        const diffMs = fechaFinMs - ahoraMs;
+        const refStartMs = Math.max(ahoraMs, fechaInicioMs);
+        const diffMs = Math.max(0, fechaFinMs - refStartMs);
         const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
         const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
         const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
@@ -1308,12 +1353,12 @@ export default function ScannerScreen() {
                         <ThemedText style={styles.historyRowTitle}>
                           {isVehicleInside
                             ? (isAccesoToday
-                              ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`
-                              : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada) || ''} hrs.`)
+                              ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`
+                              : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.hora_entrada || ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`)
                             : ultimoAcceso?.hora_salida
                               ? (isAccesoToday
-                                ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`
-                                : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida)} hrs.`)
+                                ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`
+                                : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.hora_salida || ultimoAcceso?.fecha || ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`)
                               : 'Sin registro de estancia activo.'}
                         </ThemedText>
                         <ThemedText style={styles.historyRowSubtitle}>
