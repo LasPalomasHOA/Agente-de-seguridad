@@ -71,7 +71,7 @@ AsyncStorage.getItem('hoa_mobile_token')
   .then((tok) => {
     if (tok) memoryStorageMap.set('hoa_mobile_token', tok);
   })
-  .catch(() => {});
+  .catch(() => { });
 
 export const safeStorage = {
   getItem: (key: string): string | null => {
@@ -89,7 +89,7 @@ export const safeStorage = {
       }
     } catch { }
     memoryStorageMap.set(key, value);
-    AsyncStorage.setItem(key, value).catch(() => {});
+    AsyncStorage.setItem(key, value).catch(() => { });
   },
   removeItem: (key: string): void => {
     try {
@@ -98,7 +98,7 @@ export const safeStorage = {
       }
     } catch { }
     memoryStorageMap.delete(key);
-    AsyncStorage.removeItem(key).catch(() => {});
+    AsyncStorage.removeItem(key).catch(() => { });
   },
 };
 
@@ -938,10 +938,10 @@ export const ApiService = {
             const [liveAcceso, liveSanciones] = await Promise.all([
               cachedResult.vehiculo?.id_vehiculo
                 ? this.getUltimoAcceso(
-                    cachedResult.vehiculo.id_vehiculo,
-                    cachedResult.corbatin?.id_corbatin,
-                    true
-                  ).catch(() => null)
+                  cachedResult.vehiculo.id_vehiculo,
+                  cachedResult.corbatin?.id_corbatin,
+                  true
+                ).catch(() => null)
                 : Promise.resolve(null),
               cachedResult.vehiculo?.id_vehiculo
                 ? this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: true }).catch(() => [])
@@ -997,15 +997,15 @@ export const ApiService = {
               const matched = isVerdeSearch
                 ? (matchingCorbs.find((c: any) => String(c.tipos || c.tipo || '').toUpperCase() === 'VERDE') || matchingCorbs[0])
                 : (
-                    matchingCorbs.find(
-                      (c: any) =>
-                        (c.vehiculo || c.id_vehiculo) &&
-                        String(c.estatus || '').toLowerCase() === 'activo'
-                    ) ||
-                    matchingCorbs.find((c: any) => c.vehiculo || c.id_vehiculo) ||
-                    matchingCorbs.find((c: any) => String(c.estatus || '').toLowerCase() === 'activo') ||
-                    matchingCorbs[0]
-                  );
+                  matchingCorbs.find(
+                    (c: any) =>
+                      (c.vehiculo || c.id_vehiculo) &&
+                      String(c.estatus || '').toLowerCase() === 'activo'
+                  ) ||
+                  matchingCorbs.find((c: any) => c.vehiculo || c.id_vehiculo) ||
+                  matchingCorbs.find((c: any) => String(c.estatus || '').toLowerCase() === 'activo') ||
+                  matchingCorbs[0]
+                );
 
               if (matched && Number(matched.numero) === targetNum) {
                 matchedCorbatin = matched;
@@ -1251,8 +1251,8 @@ export const ApiService = {
         typeof matchedVehiculo?.infracciones_count === 'number'
           ? Promise.resolve(matchedVehiculo.infracciones_count)
           : (hasVehicle
-              ? this.getReportesCount({ idVehiculo: Number(vehiculoRow.id_vehiculo) })
-              : Promise.resolve(0)),
+            ? this.getReportesCount({ idVehiculo: Number(vehiculoRow.id_vehiculo) })
+            : Promise.resolve(0)),
         hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin, true) : Promise.resolve(null),
       ]);
 
@@ -1310,7 +1310,7 @@ export const ApiService = {
       }
 
       // Guardar también en almacenamiento offline local para acceso sin conexión inmediato
-      saveVehicleToOfflineCatalog(result).catch(() => {});
+      saveVehicleToOfflineCatalog(result).catch(() => { });
       if (vehiculoRow.id_vehiculo) {
         apiCache.setMemoryOnly(`lookup_veh_${vehiculoRow.id_vehiculo}`, result);
       }
@@ -1324,7 +1324,7 @@ export const ApiService = {
       }
 
       // Guardar vehículo en el catálogo local offline para futuros escaneos sin internet (0 bytes Egress extra)
-      saveVehicleToOfflineCatalog(result).catch(() => {});
+      saveVehicleToOfflineCatalog(result).catch(() => { });
 
       return result;
     } catch (e) {
@@ -1577,6 +1577,7 @@ export const ApiService = {
 
       const finalUrls = processedEvidencias.map((e) => e.fotoUrl);
       let resReporteId: number | null = null;
+      let createdViaBackend = false;
 
       try {
         const res = await fetchJson('/reportes', {
@@ -1595,10 +1596,11 @@ export const ApiService = {
         });
         if (res && res.id_reporte) {
           resReporteId = res.id_reporte;
+          createdViaBackend = true;
         }
       } catch { }
 
-      // Fallback Supabase si no hubo respuesta del servidor Express o para persistir evidencias en tabla
+      // Fallback Supabase si no hubo respuesta del servidor Express, o solo para evidencias adicionales (>1 foto)
       if (isSupabaseConfigured()) {
         try {
           if (!resReporteId) {
@@ -1621,9 +1623,13 @@ export const ApiService = {
             }
           }
 
-          // Guardar cada evidencia en la tabla evidencias vinculada al reporte en batch sin roundtrips (0 bytes Egress de retorno)
-          if (resReporteId && processedEvidencias.length > 0) {
-            const rowsToInsert = processedEvidencias.map((ev) => ({
+          // Si el backend ya creó el reporte, él ya insertó la 1ª evidencia (finalUrls[0]); solo insertamos adicionales para no duplicar filas
+          const evidenciasPendientes = createdViaBackend
+            ? processedEvidencias.slice(1)
+            : processedEvidencias;
+
+          if (resReporteId && evidenciasPendientes.length > 0) {
+            const rowsToInsert = evidenciasPendientes.map((ev) => ({
               id_reporte: resReporteId,
               archivo: ev.fotoUrl,
               descripcion: ev.descripcion || 'Fotografía de evidencia levantada por oficial.',
@@ -1783,10 +1789,10 @@ export const ApiService = {
           // Verificar si algún reporte de la ventana actual cambió de estatus (ej. aprobado/rechazado por supervisor)
           const hasAnyRowStatusChange = statusMap
             ? rows.some((r: any) => {
-                const rId = Number(r.id_reporte);
-                const prevSt = statusMap[rId];
-                return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
-              })
+              const rId = Number(r.id_reporte);
+              const prevSt = statusMap[rId];
+              return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
+            })
             : false;
 
           const hasChanges = hasCountChange || hasIdChange || hasTopStatusChange || hasAnyRowStatusChange;
@@ -1823,10 +1829,10 @@ export const ApiService = {
           dbLatestStatus !== normalizedExpectedLatestStatus;
         const hasAnyRowStatusChange = statusMap
           ? data.some((r: any) => {
-              const rId = Number(r.id_reporte);
-              const prevSt = statusMap[rId];
-              return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
-            })
+            const rId = Number(r.id_reporte);
+            const prevSt = statusMap[rId];
+            return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
+          })
           : false;
 
         return {
@@ -2428,7 +2434,7 @@ export const ApiService = {
       try {
         const data = await fetchJson('/corbatines?limit=50');
         if (Array.isArray(data)) {
-          saveCorbatinesListToOfflineCatalog(data).catch(() => {});
+          saveCorbatinesListToOfflineCatalog(data).catch(() => { });
           return data;
         }
       } catch {
@@ -2601,8 +2607,8 @@ export const ApiService = {
               fecha_fin: adjustedFechaFin,
             })
             .eq('id_sancion', s.id_sancion)
-            .then(() => {})
-            .catch(() => {});
+            .then(() => { })
+            .catch(() => { });
         }
 
         return {
@@ -2631,8 +2637,9 @@ export const ApiService = {
       async () => {
         let supabaseRows: any[] = [];
         let approvedReportIds: number[] = [];
+        let supabaseDirectOk = false;
 
-        // 1. Si Supabase está configurado, consultar directamente la tabla sanciones (sin filtrar estatus='activa' para contar reincidencias exactas) y los reportes aprobados
+        // 1. Si Supabase está configurado, consultar directamente la tabla sanciones con proyección ultraligera (PostgREST ~500 bytes, evitando despertar el Shared Pooler de Express)
         if (isSupabaseConfigured() && idVehiculo) {
           try {
             const [sancRes, repRes] = await Promise.all([
@@ -2649,8 +2656,9 @@ export const ApiService = {
                 .in('estatus_revision', ['APROBADO', 'aprobado', 'APROBADA', 'aprobada']),
             ]);
 
-            if (sancRes?.data && Array.isArray(sancRes.data)) {
+            if (sancRes && !sancRes.error && Array.isArray(sancRes.data)) {
               supabaseRows = sancRes.data;
+              supabaseDirectOk = true;
             }
             if (repRes?.data && Array.isArray(repRes.data)) {
               approvedReportIds = repRes.data.map((r: any) => Number(r.id_reporte)).filter(Boolean);
@@ -2666,31 +2674,21 @@ export const ApiService = {
           return approvedReportIds.filter((id) => !linkedReportIds.has(id)).length;
         };
 
-        // 2. Consultar también Express Backend (y combinar resultados para nunca perder sanciones recién creadas)
+        // Si la consulta directa a Supabase respondió con éxito, retornar directamente sin duplicar consulta en Express (/sanciones)
+        if (supabaseDirectOk) {
+          return normalizeAndComputeReincidencias(supabaseRows, countUnlinkedApprovedReports(supabaseRows));
+        }
+
+        // 2. Fallback a Express Backend únicamente si Supabase directo no estuvo disponible o cuando no se filtra por idVehiculo
         try {
           const queryParam = idVehiculo
             ? `?id_vehiculo=${idVehiculo}&limit=50`
             : '?estatus=activa&limit=20';
           const data = await fetchJson(`/sanciones${queryParam}`);
           if (Array.isArray(data)) {
-            if (supabaseRows.length > 0) {
-              const mergedMap = new Map<number, any>();
-              for (const row of data) {
-                if (row?.id_sancion) mergedMap.set(Number(row.id_sancion), row);
-              }
-              for (const row of supabaseRows) {
-                if (row?.id_sancion) mergedMap.set(Number(row.id_sancion), { ...mergedMap.get(Number(row.id_sancion)), ...row });
-              }
-              const mergedRows = Array.from(mergedMap.values());
-              return normalizeAndComputeReincidencias(mergedRows, countUnlinkedApprovedReports(mergedRows));
-            }
             return normalizeAndComputeReincidencias(data, countUnlinkedApprovedReports(data));
           }
         } catch { }
-
-        if (supabaseRows.length > 0) {
-          return normalizeAndComputeReincidencias(supabaseRows, countUnlinkedApprovedReports(supabaseRows));
-        }
 
         if (isSupabaseConfigured() && !idVehiculo) {
           try {
