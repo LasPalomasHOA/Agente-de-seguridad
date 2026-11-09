@@ -1055,112 +1055,103 @@ export default function ScannerScreen() {
         </View>
       )}
 
-      {/* ─── 3. VEHICLE IDENTIFIED VIEW (Image 4 Left & Right) ─── */}
+      {/* ─── 3. VEHICLE IDENTIFIED VIEW (UNIFIED LAYOUT FOR HABILITADO & SUSPENDIDO) ─── */}
       {mode === 'result' && selectedVehicle && selectedCorbatin && (
         <ScrollView contentContainerStyle={styles.scrollPage} showsVerticalScrollIndicator={false}>
-          {isSuspended ? (
-            /* ─── ACCESO DENEGADO / SUSPENDIDO VIEW ─── */
-            <View style={{ gap: 16 }}>
-              {/* Top Dynamic Alert Full-Width Banner */}
+          <View style={{ gap: 16 }}>
+            {/* Top Dynamic Alert Full-Width Banner when Suspended */}
+            {isSuspended && (
               <View style={[styles.accessDeniedTopBanner, { backgroundColor: evaluacionSancion?.badgeBg || '#DC2626' }]}>
                 <View style={styles.accessDeniedIconBadge}>
                   <Ionicons name={evaluacionSancion?.requiresAdmin ? 'ban' : 'time'} size={18} color="#ffffff" />
                 </View>
                 <ThemedText style={styles.accessDeniedTopBannerText}>
-                  {evaluacionSancion?.levelTitle || 'ACCESO DENEGADO'}
+                  {evaluacionSancion?.levelTitle || 'ACCESO RESTRINGIDO'}
                 </ThemedText>
               </View>
+            )}
 
-              {/* Sub-bar with Volver */}
-              <View style={styles.subHeaderBar}>
-                <Pressable onPress={handleBackPress} style={styles.volverBtn}>
-                  <Ionicons name="arrow-back" size={16} color="#0f172a" style={{ marginRight: 4 }} />
-                  <ThemedText style={styles.volverBtnText}>VOLVER</ThemedText>
+            {/* Unified Header: Corbatín #X + Status Pill */}
+            <View style={styles.identifiedHeaderRow}>
+              <View style={styles.identifiedHeaderLeft}>
+                <Pressable onPress={handleBackPress} style={styles.backIconButton}>
+                  <Ionicons name="arrow-back" size={20} color="#0f172a" />
                 </Pressable>
+                <View style={styles.identifiedTitleContainer}>
+                  <ThemedText style={styles.screenMainTitle} numberOfLines={1}>
+                    Corbatín #{selectedCorbatin.numero}
+                  </ThemedText>
+                  <ThemedText style={styles.screenSubTitle} numberOfLines={1}>
+                    Detalle de registro vehicular y permisos
+                  </ThemedText>
+                </View>
               </View>
 
-              {/* Offline Warning Notice if scanned from local cache */}
-              {isOfflineScan && (
-                <View style={styles.offlineScanNotice}>
-                  <Ionicons name="cloud-offline" size={20} color="#B45309" />
-                  <View style={{ flex: 1 }}>
-                    <ThemedText style={styles.offlineScanNoticeTitle}>Modo sin conexión (Memoria Local)</ThemedText>
-                    <ThemedText style={styles.offlineScanNoticeSub}>
-                      Identidad obtenida del dispositivo. Sanciones y accesos en tiempo real se validarán al recuperar la red.
-                    </ThemedText>
-                  </View>
+              {isSuspended ? (
+                <View
+                  style={[
+                    styles.habilitadoPillBadge,
+                    {
+                      backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEF2F2',
+                      borderColor: evaluacionSancion?.badgeBg || '#DC2626',
+                    },
+                  ]}
+                >
+                  <Ionicons
+                    name={evaluacionSancion?.requiresAdmin ? 'ban' : 'alert-circle'}
+                    size={15}
+                    color={evaluacionSancion?.badgeBg || '#DC2626'}
+                    style={{ marginRight: 4 }}
+                  />
+                  <ThemedText
+                    style={[
+                      styles.habilitadoPillBadgeText,
+                      { color: evaluacionSancion?.badgeBg || '#DC2626' },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {evaluacionSancion?.levelBadge || 'SUSPENDIDO'}
+                  </ThemedText>
+                </View>
+              ) : (
+                <View style={styles.habilitadoPillBadge}>
+                  <Ionicons name="checkmark-circle" size={15} color="#059669" style={{ marginRight: 4 }} />
+                  <ThemedText style={styles.habilitadoPillBadgeText} numberOfLines={1}>
+                    HABILITADO
+                  </ThemedText>
                 </View>
               )}
+            </View>
 
-              {/* Suspended Vehicle Card with Photo on Left */}
-              <View style={styles.suspendedVehicleCard}>
-                <View style={styles.suspendedPhotoCol}>
-                  {selectedVehicle.foto_url ? (
-                    <Pressable onPress={() => setLightboxPhoto(selectedVehicle.foto_url || null)}>
-                      <View pointerEvents="none">
-                        <Image
-                          source={{ uri: selectedVehicle.foto_url }}
-                          style={styles.suspendedPhotoImg}
-                          contentFit="cover"
-                          cachePolicy="memory-disk"
-                        />
-                      </View>
-                    </Pressable>
-                  ) : (
-                    <View style={[styles.suspendedPhotoImg, { backgroundColor: '#F1F5F9', alignItems: 'center', justifyContent: 'center' }]}>
-                      <Ionicons name="car-outline" size={32} color="#94A3B8" />
-                      <ThemedText style={{ fontSize: 10, color: '#94A3B8', marginTop: 2, fontWeight: '600' }}>Sin foto</ThemedText>
-                    </View>
-                  )}
-                  <View style={styles.plateTagOverlay}>
-                    <ThemedText style={styles.plateTagOverlayText}>{selectedVehicle.placas}</ThemedText>
-                  </View>
-                </View>
-
-                <View style={styles.suspendedMetaCol}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                    <ThemedText style={styles.suspendedVehicleTitle}>
-                      {selectedVehicle.marca} {selectedVehicle.modelo}
-                    </ThemedText>
-                    <View style={[styles.suspendedRedBadge, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEE2E2' }]}>
-                      <View style={[styles.dotRed, { backgroundColor: evaluacionSancion?.badgeBg || '#DC2626' }]} />
-                      <ThemedText style={[styles.suspendedRedBadgeText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
-                        {evaluacionSancion?.levelBadge || 'SUSPENDIDO'}
-                      </ThemedText>
-                    </View>
-                  </View>
-
-                  <ThemedText style={styles.suspendedCompanyText}>
-                    🏢 {selectedEmpresa?.razon_social || 'Constructora Integral del Noroeste S.A. de C.V.'}
+            {/* Offline Warning Notice if scanned from local cache */}
+            {isOfflineScan && (
+              <View style={styles.offlineScanNotice}>
+                <Ionicons name="cloud-offline" size={20} color="#B45309" />
+                <View style={{ flex: 1 }}>
+                  <ThemedText style={styles.offlineScanNoticeTitle}>Modo sin conexión (Memoria Local)</ThemedText>
+                  <ThemedText style={styles.offlineScanNoticeSub}>
+                    Identidad obtenida del dispositivo. Sanciones y accesos en tiempo real se validarán al recuperar la red.
                   </ThemedText>
-
-                  <View style={styles.suspendedMiniGrid}>
-                    <View style={styles.suspendedMiniBox}>
-                      <ThemedText style={styles.dataLabel}>Conductor Asignado</ThemedText>
-                      <ThemedText style={styles.dataValueSmall}>
-                        👤 {selectedConductor ? `${selectedConductor.nombre} ${selectedConductor.apellidos}` : 'No Registrado'}
-                      </ThemedText>
-                    </View>
-                    <View style={styles.suspendedMiniBox}>
-                      <ThemedText style={styles.dataLabel}>Tipo de Pase</ThemedText>
-                      <ThemedText style={styles.dataValueSmall}>📄 Contratista Acreditado</ThemedText>
-                    </View>
-                  </View>
                 </View>
               </View>
+            )}
 
-              {/* Active Suspension Details Card */}
+            {/* Active Suspension Details Card (when Suspended) */}
+            {isSuspended && evaluacionSancion && (
               <View style={styles.suspensionDetailCard}>
                 <View style={styles.suspensionDetailHeader}>
                   <View style={[styles.gavelIconBox, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEE2E2' }]}>
                     <Ionicons name="hammer" size={18} color={evaluacionSancion?.badgeBg || '#DC2626'} />
                   </View>
-                  <View style={{ flex: 1 }}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
                     <ThemedText style={styles.suspensionDetailHeading}>Detalles de Sanción Vigente</ThemedText>
                     <ThemedText style={styles.suspensionDetailSubHeading}>Medida disciplinaria y control de acceso</ThemedText>
                   </View>
                   <View style={[styles.statusActivePill, { backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '18' : '#FEE2E2' }]}>
-                    <ThemedText style={[styles.statusActivePillText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                    <ThemedText
+                      style={[styles.statusActivePillText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}
+                      numberOfLines={1}
+                    >
                       VIGENTE
                     </ThemedText>
                   </View>
@@ -1199,256 +1190,280 @@ export default function ScannerScreen() {
                       {evaluacionSancion?.fechaFinText || 'Activa'}
                     </ThemedText>
                   </View>
-                </View>
-              </View>
-
-              {/* Action Button: REPORTAR NUEVA INFRACCIÓN */}
-              <Pressable
-                onPress={startReportWizard}
-                style={({ pressed }) => [
-                  styles.reportActionBtn,
-                  pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-                ]}
-              >
-                <Ionicons name="add-circle" size={20} color="#ffffff" style={{ marginRight: 8 }} />
-                <ThemedText style={styles.reportActionBtnText}>
-                  REPORTAR NUEVA INFRACCIÓN
-                </ThemedText>
-              </Pressable>
-            </View>
-          ) : (
-            /* ─── VEHÍCULO IDENTIFICADO (HABILITADO) VIEW ─── */
-            <View style={{ gap: 16 }}>
-              {/* Header */}
-              <View style={styles.identifiedHeaderRow}>
-                <View style={styles.identifiedHeaderLeft}>
-                  <Pressable onPress={handleBackPress} style={styles.backIconButton}>
-                    <Ionicons name="arrow-back" size={20} color="#0f172a" />
-                  </Pressable>
-                  <View style={styles.identifiedTitleContainer}>
-                    <ThemedText style={styles.screenMainTitle} numberOfLines={1}>
-                      Corbatín #{selectedCorbatin.numero}
-                    </ThemedText>
-                    <ThemedText style={styles.screenSubTitle} numberOfLines={1}>
-                      Detalle de registro vehicular y permisos
-                    </ThemedText>
-                  </View>
-                </View>
-
-                {/* Green Habilitado Badge */}
-                <View style={styles.habilitadoPillBadge}>
-                  <Ionicons name="checkmark-circle" size={15} color="#059669" style={{ marginRight: 4 }} />
-                  <ThemedText style={styles.habilitadoPillBadgeText}>HABILITADO</ThemedText>
-                </View>
-              </View>
-
-              {/* ─── BANNER INFORMATIVO AMARILLO PARA 1ª FALTA (LLAMADO DE ATENCIÓN) ─── */}
-              {hasWarningLevel1 && (
-                <View style={styles.warningLevel1Banner}>
-                  <View style={styles.warningLevel1IconCircle}>
-                    <Ionicons name="warning" size={20} color="#D97706" />
-                  </View>
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <ThemedText style={styles.warningLevel1Title}>1ª Falta: Llamado de Atención</ThemedText>
-                    <ThemedText style={styles.warningLevel1Desc}>
-                      {evaluacionSancion?.motivo || 'Primer llamado de atención registrado en el sistema. Se autoriza el acceso vehicular.'}
-                    </ThemedText>
-                  </View>
-                  <View style={styles.warningLevel1Pill}>
-                    <Ionicons name="checkmark-circle" size={12} color="#059669" style={{ marginRight: 4 }} />
-                    <ThemedText style={styles.warningLevel1PillText}>PERMITIDO</ThemedText>
-                  </View>
-                </View>
-              )}
-
-              {/* 2-Column Layout */}
-              <View style={styles.identified2ColRow}>
-                {/* Left Column: Datos del Vehículo & Historial */}
-                <View style={styles.identifiedLeftCol}>
-                  {/* Card Datos del Vehículo */}
-                  <View style={styles.vehicleDataCardGreenLeft}>
-                    <View style={styles.cardHeaderTitleRow}>
-                      <Ionicons name="car-sport-outline" size={18} color="#0D6E5F" style={{ marginRight: 6 }} />
-                      <ThemedText style={styles.vehicleDataCardTitle}>Datos del Vehículo</ThemedText>
-                    </View>
-
-                    {/* Row 1: Empresa & Marca/Modelo */}
-                    <View style={styles.grid2Col}>
-                      <View style={styles.dataCol}>
-                        <ThemedText style={styles.dataLabel}>Empresa Contratista</ThemedText>
-                        <View style={styles.dataValueBox}>
-                          <ThemedText style={styles.dataValue}>
-                            {selectedEmpresa?.razon_social || 'Servicios y Contratistas'}
-                          </ThemedText>
-                        </View>
-                      </View>
-                      <View style={styles.dataCol}>
-                        <ThemedText style={styles.dataLabel}>Marca / Modelo</ThemedText>
-                        <View style={styles.dataValueBox}>
-                          <ThemedText style={styles.dataValue}>
-                            {selectedVehicle.marca} {selectedVehicle.modelo}
-                          </ThemedText>
-                        </View>
-                      </View>
-                    </View>
-
-                    {/* Row 2: Placas & Color */}
-                    <View style={styles.grid2Col}>
-                      <View style={styles.dataCol}>
-                        <ThemedText style={styles.dataLabel}>Placas</ThemedText>
-                        <View style={styles.dataValueBox}>
-                          <ThemedText style={styles.dataValueBold}>{selectedVehicle.placas}</ThemedText>
-                        </View>
-                      </View>
-                      <View style={styles.dataCol}>
-                        <ThemedText style={styles.dataLabel}>Color</ThemedText>
-                        <View style={[styles.dataValueBox, { flexDirection: 'row', alignItems: 'center', gap: 6 }]}>
-                          <View style={styles.colorDotRadio} />
-                          <ThemedText style={styles.dataValue}>{selectedVehicle.color}</ThemedText>
-                        </View>
-                      </View>
-                    </View>
-
-                    {/* Row 3: Conductor & Vencimiento */}
-                    <View style={styles.grid2Col}>
-                      <View style={styles.dataCol}>
-                        <ThemedText style={styles.dataLabel}>Conductor Asignado</ThemedText>
-                        <View style={styles.dataValueBox}>
-                          <ThemedText style={styles.dataValue}>
-                            👤 {selectedConductor ? `${selectedConductor.nombre} ${selectedConductor.apellidos}` : 'No Registrado'}
-                          </ThemedText>
-                        </View>
-                      </View>
-                      <View style={styles.dataCol}>
-                        <ThemedText style={styles.dataLabel}>Vencimiento Corbatín</ThemedText>
-                        <View style={styles.dataValueBox}>
-                          <ThemedText style={styles.dataValue}>
-                            📅 {selectedCorbatin?.fecha_vencimiento ? new Date(selectedCorbatin.fecha_vencimiento).toLocaleDateString() : 'Vigente'}
-                          </ThemedText>
-                        </View>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* Card Historial y Estatus de Caseta */}
-                  <View style={[styles.historyCard, isVehicleInside && styles.historyCardInsideHighlight]}>
-                    <View style={styles.cardHeaderTitleRow}>
+                  {evaluacionSancion?.timeRemainingText ? (
+                    <View
+                      style={[
+                        styles.hoursRemainingBadge,
+                        {
+                          backgroundColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '12' : '#FEF2F2',
+                          borderColor: evaluacionSancion?.badgeBg ? evaluacionSancion.badgeBg + '35' : '#FECACA',
+                        },
+                      ]}
+                    >
                       <Ionicons
-                        name={isVehicleInside ? 'navigate-circle' : 'time-outline'}
-                        size={16}
-                        color={isVehicleInside ? '#0D6E5F' : '#64748B'}
-                        style={{ marginRight: 6 }}
+                        name={evaluacionSancion.requiresAdmin ? 'lock-closed-outline' : 'time-outline'}
+                        size={14}
+                        color={evaluacionSancion?.badgeBg || '#DC2626'}
+                        style={{ marginRight: 5 }}
                       />
-                      <ThemedText style={[styles.historyCardTitle, isVehicleInside && { color: '#0D6E5F' }]}>
-                        {isVehicleInside ? 'Vehículo Dentro del Complejo' : 'Estatus de Estancia en Caseta'}
+                      <ThemedText style={[styles.hoursRemainingText, { color: evaluacionSancion?.badgeBg || '#DC2626' }]}>
+                        {evaluacionSancion.timeRemainingText}
                       </ThemedText>
                     </View>
-                    <View style={styles.historyRowBox}>
-                      <Ionicons
-                        name={isVehicleInside ? 'checkmark-circle' : 'log-out-outline'}
-                        size={28}
-                        color={isVehicleInside ? '#10B981' : '#94A3B8'}
-                      />
-                      <View style={{ flex: 1 }}>
-                        <ThemedText style={styles.historyRowTitle}>
-                          {isVehicleInside
+                  ) : null}
+                </View>
+              </View>
+            )}
+
+            {/* ─── BANNER INFORMATIVO AMARILLO PARA 1ª FALTA (LLAMADO DE ATENCIÓN) ─── */}
+            {!isSuspended && hasWarningLevel1 && (
+              <View style={styles.warningLevel1Banner}>
+                <View style={styles.warningLevel1IconCircle}>
+                  <Ionicons name="warning" size={20} color="#D97706" />
+                </View>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <ThemedText style={styles.warningLevel1Title}>1ª Falta: Llamado de Atención</ThemedText>
+                  <ThemedText style={styles.warningLevel1Desc}>
+                    {evaluacionSancion?.motivo || 'Primer llamado de atención registrado en el sistema. Se autoriza el acceso vehicular.'}
+                  </ThemedText>
+                </View>
+                <View style={styles.warningLevel1Pill}>
+                  <Ionicons name="checkmark-circle" size={12} color="#059669" style={{ marginRight: 4 }} />
+                  <ThemedText style={styles.warningLevel1PillText}>PERMITIDO</ThemedText>
+                </View>
+              </View>
+            )}
+
+            {/* Unified 2-Column Layout */}
+            <View style={styles.identified2ColRow}>
+              {/* Left Column: Datos del Vehículo & Historial */}
+              <View style={styles.identifiedLeftCol}>
+                {/* Card Datos del Vehículo */}
+                <View
+                  style={[
+                    styles.vehicleDataCardGreenLeft,
+                    isSuspended && { borderLeftColor: evaluacionSancion?.badgeBg || '#DC2626' },
+                  ]}
+                >
+                  <View style={styles.cardHeaderTitleRow}>
+                    <Ionicons
+                      name="car-sport-outline"
+                      size={18}
+                      color={isSuspended ? (evaluacionSancion?.badgeBg || '#DC2626') : '#0D6E5F'}
+                      style={{ marginRight: 6 }}
+                    />
+                    <ThemedText style={styles.vehicleDataCardTitle}>Datos del Vehículo</ThemedText>
+                  </View>
+
+                  {/* Row 1: Empresa & Marca/Modelo */}
+                  <View style={styles.grid2Col}>
+                    <View style={styles.dataCol}>
+                      <ThemedText style={styles.dataLabel}>Empresa Contratista</ThemedText>
+                      <View style={styles.dataValueBox}>
+                        <ThemedText style={styles.dataValue}>
+                          {selectedEmpresa?.razon_social || 'Servicios y Contratistas'}
+                        </ThemedText>
+                      </View>
+                    </View>
+                    <View style={styles.dataCol}>
+                      <ThemedText style={styles.dataLabel}>Marca / Modelo</ThemedText>
+                      <View style={styles.dataValueBox}>
+                        <ThemedText style={styles.dataValue}>
+                          {selectedVehicle.marca} {selectedVehicle.modelo}
+                        </ThemedText>
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Row 2: Placas & Color */}
+                  <View style={styles.grid2Col}>
+                    <View style={styles.dataCol}>
+                      <ThemedText style={styles.dataLabel}>Placas</ThemedText>
+                      <View style={styles.dataValueBox}>
+                        <ThemedText style={styles.dataValueBold}>{selectedVehicle.placas}</ThemedText>
+                      </View>
+                    </View>
+                    <View style={styles.dataCol}>
+                      <ThemedText style={styles.dataLabel}>Color</ThemedText>
+                      <View style={[styles.dataValueBox, { flexDirection: 'row', alignItems: 'center', gap: 6 }]}>
+                        <View style={styles.colorDotRadio} />
+                        <ThemedText style={styles.dataValue}>{selectedVehicle.color}</ThemedText>
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Row 3: Conductor & Vencimiento */}
+                  <View style={styles.grid2Col}>
+                    <View style={styles.dataCol}>
+                      <ThemedText style={styles.dataLabel}>Conductor Asignado</ThemedText>
+                      <View style={styles.dataValueBox}>
+                        <ThemedText style={styles.dataValue}>
+                          👤 {selectedConductor ? `${selectedConductor.nombre} ${selectedConductor.apellidos}` : 'No Registrado'}
+                        </ThemedText>
+                      </View>
+                    </View>
+                    <View style={styles.dataCol}>
+                      <ThemedText style={styles.dataLabel}>Vencimiento Corbatín</ThemedText>
+                      <View style={styles.dataValueBox}>
+                        <ThemedText style={styles.dataValue}>
+                          📅 {selectedCorbatin?.fecha_vencimiento ? new Date(selectedCorbatin.fecha_vencimiento).toLocaleDateString() : 'Vigente'}
+                        </ThemedText>
+                      </View>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Card Historial y Estatus de Caseta */}
+                <View style={[styles.historyCard, isVehicleInside && styles.historyCardInsideHighlight]}>
+                  <View style={styles.cardHeaderTitleRow}>
+                    <Ionicons
+                      name={isVehicleInside ? 'navigate-circle' : 'time-outline'}
+                      size={16}
+                      color={isVehicleInside ? '#0D6E5F' : '#64748B'}
+                      style={{ marginRight: 6 }}
+                    />
+                    <ThemedText style={[styles.historyCardTitle, isVehicleInside && { color: '#0D6E5F' }]}>
+                      {isVehicleInside ? 'Vehículo Dentro del Complejo' : 'Estatus de Estancia en Caseta'}
+                    </ThemedText>
+                  </View>
+                  <View style={styles.historyRowBox}>
+                    <Ionicons
+                      name={isVehicleInside ? 'checkmark-circle' : 'log-out-outline'}
+                      size={28}
+                      color={isVehicleInside ? '#10B981' : '#94A3B8'}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <ThemedText style={styles.historyRowTitle}>
+                        {isVehicleInside
+                          ? (isAccesoToday
+                            ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`
+                            : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.hora_entrada || ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`)
+                          : ultimoAcceso?.hora_salida
                             ? (isAccesoToday
-                              ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`
-                              : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.hora_entrada || ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`)
-                            : ultimoAcceso?.hora_salida
-                              ? (isAccesoToday
-                                ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`
-                                : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.hora_salida || ultimoAcceso?.fecha || ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`)
-                              : 'Sin registro de estancia activo.'}
-                        </ThemedText>
-                        <ThemedText style={styles.historyRowSubtitle}>
-                          {isVehicleInside
-                            ? `Tiempo de estancia actual: ${tiempoEstancia || 'En curso'}`
-                            : 'El vehículo se encuentra fuera del resort.'}
-                        </ThemedText>
-                      </View>
+                              ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`
+                              : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.hora_salida || ultimoAcceso?.fecha || ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`)
+                            : 'Sin registro de estancia activo.'}
+                      </ThemedText>
+                      <ThemedText style={styles.historyRowSubtitle}>
+                        {isVehicleInside
+                          ? `Tiempo de estancia actual: ${tiempoEstancia || 'En curso'}`
+                          : 'El vehículo se encuentra fuera del resort.'}
+                      </ThemedText>
                     </View>
                   </View>
                 </View>
+              </View>
 
-                {/* Right Column: Foto, Botón de Salida/Entrada, Botón de Infracción & Enlace */}
-                <View style={styles.identifiedRightCol}>
-                  {selectedVehicle.foto_url ? (
-                    <Pressable
-                      onPress={() => setLightboxPhoto(selectedVehicle.foto_url || null)}
-                      style={({ pressed }) => [
-                        styles.photoReferenceCard,
-                        pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-                      ]}
-                    >
-                      <View pointerEvents="none">
-                        <Image
-                          source={{ uri: selectedVehicle.foto_url }}
-                          style={styles.referencePhotoImg}
-                          contentFit="cover"
-                          cachePolicy="memory-disk"
-                        />
-                      </View>
-                      <View style={styles.photoReferenceFooter}>
-                        <ThemedText style={styles.photoReferenceLabel}>Foto de Referencia &bull; Tocar para Zoom</ThemedText>
-                        <Ionicons name="search" size={14} color="#0D6E5F" />
-                      </View>
-                    </Pressable>
-                  ) : (
-                    <View style={[styles.photoReferenceCard, { alignItems: 'center', justifyContent: 'center', paddingVertical: 22, backgroundColor: '#F8FAFC' }]}>
-                      <Ionicons name="car-outline" size={40} color="#CBD5E1" />
-                      <ThemedText style={{ fontSize: 11, color: '#94A3B8', marginTop: 6, fontWeight: '600' }}>
-                        Sin fotografía registrada
-                      </ThemedText>
+              {/* Right Column: Foto de Referencia Uniforme, Botón de Salida/Entrada, Botón de Infracción & Enlace */}
+              <View style={styles.identifiedRightCol}>
+                {selectedVehicle.foto_url ? (
+                  <Pressable
+                    onPress={() => setLightboxPhoto(selectedVehicle.foto_url || null)}
+                    style={({ pressed }) => [
+                      styles.photoReferenceCard,
+                      pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                    ]}
+                  >
+                    <View pointerEvents="none">
+                      <Image
+                        source={{ uri: selectedVehicle.foto_url }}
+                        style={styles.referencePhotoImg}
+                        contentFit="cover"
+                        cachePolicy="memory-disk"
+                      />
                     </View>
-                  )}
+                    <View style={styles.photoReferenceFooter}>
+                      <ThemedText style={styles.photoReferenceLabel}>Foto de Referencia &bull; Tocar para Zoom</ThemedText>
+                      <Ionicons name="search" size={14} color="#0D6E5F" />
+                    </View>
+                  </Pressable>
+                ) : (
+                  <View style={[styles.photoReferenceCard, { alignItems: 'center', justifyContent: 'center', paddingVertical: 22, backgroundColor: '#F8FAFC' }]}>
+                    <Ionicons name="car-outline" size={40} color="#CBD5E1" />
+                    <ThemedText style={{ fontSize: 11, color: '#94A3B8', marginTop: 6, fontWeight: '600' }}>
+                      Sin fotografía registrada
+                    </ThemedText>
+                  </View>
+                )}
 
-                  {/* ─── BOTÓN PRINCIPAL DE CONTROL DE ACCESO (SALIDA / ENTRADA) ─── */}
-                  {isVehicleInside ? (
-                    <Pressable
-                      onPress={handleMarcarSalida}
-                      disabled={actionLoading}
-                      style={({ pressed }) => [
-                        styles.exitActionBtn,
-                        pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-                        actionLoading && { opacity: 0.7 },
-                      ]}
-                    >
-                      {actionLoading ? (
-                        <ActivityIndicator size="small" color="#ffffff" />
-                      ) : (
-                        <>
-                          <Ionicons name="log-out-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
-                          <ThemedText style={styles.exitActionBtnText}>
-                            MARCAR SALIDA DEL VEHÍCULO
-                          </ThemedText>
-                        </>
-                      )}
-                    </Pressable>
-                  ) : (
-                    <Pressable
-                      onPress={handleRegistrarEntrada}
-                      disabled={actionLoading}
-                      style={({ pressed }) => [
-                        styles.entryActionBtn,
-                        pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-                        actionLoading && { opacity: 0.7 },
-                      ]}
-                    >
-                      {actionLoading ? (
-                        <ActivityIndicator size="small" color="#ffffff" />
-                      ) : (
-                        <>
-                          <Ionicons name="log-in-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
-                          <ThemedText style={styles.entryActionBtnText}>
-                            REGISTRAR ENTRADA
-                          </ThemedText>
-                        </>
-                      )}
-                    </Pressable>
-                  )}
+                {/* ─── BOTÓN PRINCIPAL DE CONTROL DE ACCESO (SALIDA / ENTRADA / BLOQUEADO) ─── */}
+                {isVehicleInside ? (
+                  <Pressable
+                    onPress={handleMarcarSalida}
+                    disabled={actionLoading}
+                    style={({ pressed }) => [
+                      styles.exitActionBtn,
+                      pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                      actionLoading && { opacity: 0.7 },
+                    ]}
+                  >
+                    {actionLoading ? (
+                      <ActivityIndicator size="small" color="#ffffff" />
+                    ) : (
+                      <>
+                        <Ionicons name="log-out-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                        <ThemedText style={styles.exitActionBtnText}>
+                          MARCAR SALIDA DEL VEHÍCULO
+                        </ThemedText>
+                      </>
+                    )}
+                  </Pressable>
+                ) : isSuspended ? (
+                  <View
+                    style={[
+                      styles.entryActionBtn,
+                      {
+                        backgroundColor: '#FEF2F2',
+                        borderWidth: 1.5,
+                        borderColor: '#FECACA',
+                        shadowOpacity: 0,
+                        elevation: 0,
+                      },
+                    ]}
+                  >
+                    <Ionicons name="ban" size={18} color="#DC2626" style={{ marginRight: 8 }} />
+                    <ThemedText style={[styles.entryActionBtnText, { color: '#DC2626' }]}>
+                      ENTRADA VEHICULAR BLOQUEADA
+                    </ThemedText>
+                  </View>
+                ) : (
+                  <Pressable
+                    onPress={handleRegistrarEntrada}
+                    disabled={actionLoading}
+                    style={({ pressed }) => [
+                      styles.entryActionBtn,
+                      pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                      actionLoading && { opacity: 0.7 },
+                    ]}
+                  >
+                    {actionLoading ? (
+                      <ActivityIndicator size="small" color="#ffffff" />
+                    ) : (
+                      <>
+                        <Ionicons name="log-in-outline" size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                        <ThemedText style={styles.entryActionBtnText}>
+                          REGISTRAR ENTRADA
+                        </ThemedText>
+                      </>
+                    )}
+                  </Pressable>
+                )}
 
-                  {/* Action Button: REPORTAR INFRACCIÓN */}
+                {/* Action Button: REPORTAR INFRACCIÓN */}
+                {isSuspended ? (
+                  <Pressable
+                    onPress={startReportWizard}
+                    style={({ pressed }) => [
+                      styles.reportActionBtn,
+                      pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                    ]}
+                  >
+                    <Ionicons name="add-circle" size={20} color="#ffffff" style={{ marginRight: 8 }} />
+                    <ThemedText style={styles.reportActionBtnText}>
+                      REPORTAR NUEVA INFRACCIÓN
+                    </ThemedText>
+                  </Pressable>
+                ) : (
                   <Pressable
                     onPress={startReportWizard}
                     disabled={!isVehicleInside}
@@ -1473,19 +1488,19 @@ export default function ScannerScreen() {
                       {isVehicleInside ? 'REPORTAR INFRACCIÓN' : 'REPORTAR INFRACCIÓN (VEHÍCULO FUERA)'}
                     </ThemedText>
                   </Pressable>
+                )}
 
-                  {/* Historial Completo Link */}
-                  <Pressable
-                    onPress={() => router.push('/reports')}
-                    style={styles.viewFullHistoryBtn}
-                  >
-                    <Ionicons name="list-outline" size={16} color="#475569" style={{ marginRight: 6 }} />
-                    <ThemedText style={styles.viewFullHistoryText}>Ver Historial Completo</ThemedText>
-                  </Pressable>
-                </View>
+                {/* Historial Completo Link */}
+                <Pressable
+                  onPress={() => router.push('/reports')}
+                  style={styles.viewFullHistoryBtn}
+                >
+                  <Ionicons name="list-outline" size={16} color="#475569" style={{ marginRight: 6 }} />
+                  <ThemedText style={styles.viewFullHistoryText}>Ver Historial Completo</ThemedText>
+                </Pressable>
               </View>
             </View>
-          )}
+          </View>
         </ScrollView>
       )}
 
@@ -3577,14 +3592,15 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   statusActivePill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: 6,
+    flexShrink: 0,
   },
   statusActivePillText: {
     fontSize: 10,
     fontWeight: '900',
-    letterSpacing: 0.4,
+    letterSpacing: 0.3,
   },
   reincidenciaBanner: {
     flexDirection: 'row',

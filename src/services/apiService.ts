@@ -2473,7 +2473,7 @@ export const ApiService = {
       httpEtagCache.delete(`/sanciones?id_vehiculo=${idVehiculo}&estatus=activa&limit=10`);
     }
 
-    const normalizeAndComputeReincidencias = (rawRows: any[], approvedReportsCount = 0): any[] => {
+    const normalizeAndComputeReincidencias = (rawRows: any[], unlinkedApprovedReportsCount = 0): any[] => {
       if (!Array.isArray(rawRows) || rawRows.length === 0) return [];
 
       // Filtrar por vehículo si aplica
@@ -2481,35 +2481,81 @@ export const ApiService = {
         ? rawRows.filter((s: any) => Number(s.id_vehiculo) === Number(idVehiculo))
         : rawRows;
 
-      // Descartar únicamente sanciones canceladas o levantadas definitivamente en oficina
-      const validRows = vehicleRows.filter((s: any) => {
-        const est = (s.estatus || '').toString().trim().toUpperCase();
-        if (est === 'CANCELADA' || est === 'CANCELADO' || est === 'ACLARADA' || est === 'ACLARADO') {
-          return false;
+      // Helper para detectar si una sanción fue apelada/cancelada o levantada definitivamente
+      const isCancelledOrLifted = (s: any): boolean => {
+        const est = (s.estatus || s.status || '').toString().trim().toUpperCase();
+        if (
+          est === 'CANCELADA' ||
+          est === 'CANCELADO' ||
+          est === 'ACLARADA' ||
+          est === 'ACLARADO' ||
+          est === 'LEVANTADA' ||
+          est === 'LEVANTADO'
+        ) {
+          return true;
         }
         const rawMotivo = s.motivo || '';
         const resIdx = rawMotivo.indexOf('[RESOLUCION_OFICINA_DATA]');
         if (resIdx !== -1) {
           try {
-            const jsonPart = rawMotivo.substring(resIdx + '[RESOLUCION_OFICINA_DATA]'.length).split(/\[[A-Z_]+\]/)[0].trim();
+            const jsonPart = rawMotivo
+              .substring(resIdx + '[RESOLUCION_OFICINA_DATA]'.length)
+              .replace(/\[\/RESOLUCION_OFICINA_DATA\].*$/s, '')
+              .split(/\[[A-Z_]+\]/)[0]
+              .trim();
             const parsedRes = JSON.parse(jsonPart);
-            if (parsedRes.tipo_resolucion === 'levantamiento_definitivo') {
-              return false;
+            const tipoRes = parsedRes.tipoResolucion || parsedRes.tipo_resolucion;
+            if (tipoRes === 'levantamiento_definitivo') {
+              return true;
             }
-            if (parsedRes.tipo_resolucion === 'permiso_temporal' && parsedRes.permiso_temporal_hasta) {
-              const expDate = new Date(parsedRes.permiso_temporal_hasta);
+          } catch { }
+        }
+        if (s.resolucionOficina?.tipoResolucion === 'levantamiento_definitivo') {
+          return true;
+        }
+        return false;
+      };
+
+      // Helper para detectar si una sanción tiene un permiso temporal vigente hoy
+      const hasActiveTemporaryPermit = (s: any): boolean => {
+        const rawMotivo = s.motivo || '';
+        const resIdx = rawMotivo.indexOf('[RESOLUCION_OFICINA_DATA]');
+        if (resIdx !== -1) {
+          try {
+            const jsonPart = rawMotivo
+              .substring(resIdx + '[RESOLUCION_OFICINA_DATA]'.length)
+              .replace(/\[\/RESOLUCION_OFICINA_DATA\].*$/s, '')
+              .split(/\[[A-Z_]+\]/)[0]
+              .trim();
+            const parsedRes = JSON.parse(jsonPart);
+            const tipoRes = parsedRes.tipoResolucion || parsedRes.tipo_resolucion;
+            const expStr = parsedRes.fechaExpiracionPermiso || parsedRes.permiso_temporal_hasta;
+            if (tipoRes === 'permiso_temporal' && expStr) {
+              const expDate = new Date(expStr);
               if (new Date() < expDate) {
-                return false;
+                return true;
               }
             }
           } catch { }
         }
-        return true;
-      });
+        if (
+          s.resolucionOficina?.tipoResolucion === 'permiso_temporal' &&
+          s.resolucionOficina?.fechaExpiracionPermiso
+        ) {
+          const expDate = new Date(s.resolucionOficina.fechaExpiracionPermiso);
+          if (new Date() < expDate) {
+            return true;
+          }
+        }
+        return false;
+      };
 
-      // Ordenar cronológicamente (menor id_sancion primero) para calcular el nivel real de reincidencia (1ª, 2ª, 3ª, 4ª)
-      const chronological = [...validRows].sort(
-        (a, b) => Number(a.id_sancion || 0) - Number(b.id_sancion || 0)
+      // 1. Excluir sanciones apeladas/canceladas/aclaradas del contador global de reincidencia
+      const nonCancelledRows = vehicleRows.filter((s: any) => !isCancelledOrLifted(s));
+
+      // 2. Ordenar cronológicamente (menor id_sancion primero) para calcular el nivel real de reincidencia (1ª, 2ª, 3ª, 4ª)
+      const chronological = [...nonCancelledRows].sort(
+        (a, b) => Number(a.id_sancion || a.id || 0) - Number(b.id_sancion || b.id || 0)
       );
 
       const enriched = chronological.map((s: any, idx: number) => {
@@ -2521,25 +2567,58 @@ export const ApiService = {
           }
         }
 
-        const storedNivel = Math.max(Number(s.numero_reincidencia) || 1, Number(s.id_regla) || 1);
+        // El nivel real de reincidencia depende estrictamente del orden cronológico de sanciones NO canceladas
         const chronologicalNivel = idx + 1;
-        // Si es la última sanción registrada y existen más reportes aprobados para este vehículo, reflejar el conteo real
         const isLast = idx === chronological.length - 1;
         const effectiveCount = isLast
-          ? Math.max(storedNivel, chronologicalNivel, approvedReportsCount)
-          : Math.max(storedNivel, chronologicalNivel);
+          ? Math.max(chronologicalNivel, chronologicalNivel + unlinkedApprovedReportsCount)
+          : chronologicalNivel;
         const finalNivel = Math.min(Math.max(effectiveCount, 1), 4);
+
+        // Si el nivel se redujo respecto a un valor inflado en BD (ej. de 4 a 3 tras apelar una falta previa), ajustar fecha_fin
+        let adjustedFechaFin = s.fecha_fin;
+        if (finalNivel === 2 && !adjustedFechaFin && s.fecha_inicio) {
+          adjustedFechaFin = new Date(new Date(s.fecha_inicio).getTime() + 24 * 60 * 60 * 1000).toISOString();
+        } else if (finalNivel === 3 && !adjustedFechaFin && s.fecha_inicio) {
+          adjustedFechaFin = new Date(new Date(s.fecha_inicio).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+        } else if ((finalNivel === 1 || finalNivel === 4) && adjustedFechaFin) {
+          adjustedFechaFin = null;
+        }
+
+        // Auto-corregir en Supabase si el registro tenía un numero_reincidencia inflado por una apelación previa
+        const storedNum = Number(s.numero_reincidencia) || 0;
+        const storedRegla = Number(s.id_regla) || 0;
+        if (
+          isSupabaseConfigured() &&
+          s.id_sancion &&
+          (storedNum !== finalNivel || storedRegla !== finalNivel || s.fecha_fin !== adjustedFechaFin)
+        ) {
+          (supabase as any)
+            .from('sanciones' as any)
+            .update({
+              numero_reincidencia: finalNivel,
+              id_regla: finalNivel,
+              fecha_fin: adjustedFechaFin,
+            })
+            .eq('id_sancion', s.id_sancion)
+            .then(() => {})
+            .catch(() => {});
+        }
 
         return {
           ...s,
           motivo: cleanMotivo || 'Falta al reglamento',
           id_regla: finalNivel,
           numero_reincidencia: finalNivel,
+          fecha_fin: adjustedFechaFin,
         };
       });
 
+      // 3. Filtrar las que tienen permiso temporal activo hoy para que permitan el acceso en caseta sin alterar el conteo histórico
+      const activeEnriched = enriched.filter((s: any) => !hasActiveTemporaryPermit(s));
+
       // Retornar más recientes y de mayor nivel primero
-      return enriched.sort(
+      return activeEnriched.sort(
         (a, b) =>
           (Number(b.numero_reincidencia) || 1) - (Number(a.numero_reincidencia) || 1) ||
           Number(b.id_sancion || 0) - Number(a.id_sancion || 0)
@@ -2551,9 +2630,9 @@ export const ApiService = {
       TTL_SANCIONES,
       async () => {
         let supabaseRows: any[] = [];
-        let approvedReportsCount = 0;
+        let approvedReportIds: number[] = [];
 
-        // 1. Si Supabase está configurado, consultar directamente la tabla sanciones (sin filtrar estatus='activa' para contar reincidencias exactas) y el conteo de reportes aprobados
+        // 1. Si Supabase está configurado, consultar directamente la tabla sanciones (sin filtrar estatus='activa' para contar reincidencias exactas) y los reportes aprobados
         if (isSupabaseConfigured() && idVehiculo) {
           try {
             const [sancRes, repRes] = await Promise.all([
@@ -2574,10 +2653,18 @@ export const ApiService = {
               supabaseRows = sancRes.data;
             }
             if (repRes?.data && Array.isArray(repRes.data)) {
-              approvedReportsCount = repRes.data.length;
+              approvedReportIds = repRes.data.map((r: any) => Number(r.id_reporte)).filter(Boolean);
             }
           } catch { }
         }
+
+        const countUnlinkedApprovedReports = (allSanciones: any[]): number => {
+          if (approvedReportIds.length === 0) return 0;
+          const linkedReportIds = new Set(
+            allSanciones.map((s: any) => Number(s.id_reporte)).filter(Boolean)
+          );
+          return approvedReportIds.filter((id) => !linkedReportIds.has(id)).length;
+        };
 
         // 2. Consultar también Express Backend (y combinar resultados para nunca perder sanciones recién creadas)
         try {
@@ -2594,14 +2681,15 @@ export const ApiService = {
               for (const row of supabaseRows) {
                 if (row?.id_sancion) mergedMap.set(Number(row.id_sancion), { ...mergedMap.get(Number(row.id_sancion)), ...row });
               }
-              return normalizeAndComputeReincidencias(Array.from(mergedMap.values()), approvedReportsCount);
+              const mergedRows = Array.from(mergedMap.values());
+              return normalizeAndComputeReincidencias(mergedRows, countUnlinkedApprovedReports(mergedRows));
             }
-            return normalizeAndComputeReincidencias(data, approvedReportsCount);
+            return normalizeAndComputeReincidencias(data, countUnlinkedApprovedReports(data));
           }
         } catch { }
 
         if (supabaseRows.length > 0) {
-          return normalizeAndComputeReincidencias(supabaseRows, approvedReportsCount);
+          return normalizeAndComputeReincidencias(supabaseRows, countUnlinkedApprovedReports(supabaseRows));
         }
 
         if (isSupabaseConfigured() && !idVehiculo) {
