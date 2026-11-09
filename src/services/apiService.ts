@@ -1525,7 +1525,10 @@ export const ApiService = {
     descripcionHechos: string;
     evidenciasUrls?: string[];
     evidencias?: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }>;
-  }): Promise<{ idReporte: number } | null> {
+  }): Promise<{
+    idReporte: number;
+    evidencias?: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }>;
+  } | null> {
     try {
       const now = new Date();
       // La sanción entra en vigor al día siguiente a las 12:00 AM (hora local)
@@ -1544,41 +1547,56 @@ export const ApiService = {
         fechaFinStr = null; // 4ª Falta: Definitiva
       }
 
-      // 1. Procesar y subir evidencias a Supabase Storage (comprimidas a WebP)
+      // 1. Subir primero todas las evidencias a Supabase Storage (en pendientes/ como antes, sin crear folders por reporte)
       const processedEvidencias: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }> = [];
-      const rawList = params.evidencias || (params.evidenciasUrls || []).map((url) => ({ fotoUrl: url }));
+      const rawList: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }> =
+        params.evidencias || (params.evidenciasUrls || []).map((url) => ({ fotoUrl: url }));
+      const totalFotos = rawList.filter((it) => Boolean(it?.fotoUrl)).length;
+      const batchTimestamp = Date.now();
 
       for (let i = 0; i < rawList.length; i++) {
         const item = rawList[i];
         if (!item.fotoUrl) continue;
 
+        const defaultDesc =
+          item.descripcion || `Evidencia fotográfica ${i + 1} de ${totalFotos} levantada por oficial.`;
+
         try {
           if (item.fotoUrl.startsWith('http://') || item.fotoUrl.startsWith('https://')) {
             // Ya es una URL remota
-            processedEvidencias.push(item);
+            processedEvidencias.push({
+              ...item,
+              descripcion: defaultDesc,
+            });
           } else {
-            // Es base64 o archivo local: comprimir y subir a Supabase Storage
+            // Es base64 o archivo local: comprimir y subir a Supabase Storage (en pendientes/)
             const uploadRes = await uploadEvidenciaASupabase(item.fotoUrl, {
               idUsuario: params.idUsuario,
-              fileName: `ev_${Date.now()}_${i + 1}.webp`,
+              fileName: `ev_${batchTimestamp}_${i + 1}.webp`,
             });
             if (uploadRes?.publicUrl) {
               processedEvidencias.push({
                 ...item,
                 fotoUrl: uploadRes.publicUrl,
+                descripcion: defaultDesc,
               });
             }
           }
         } catch (uploadErr) {
           console.warn('[ApiService] Error subiendo evidencia a Storage:', uploadErr);
-          processedEvidencias.push(item);
+          processedEvidencias.push({
+            ...item,
+            descripcion: defaultDesc,
+          });
         }
       }
 
       const finalUrls = processedEvidencias.map((e) => e.fotoUrl);
       let resReporteId: number | null = null;
       let createdViaBackend = false;
+      let backendInsertedCount = 0;
 
+      // 2. Crear el reporte enviando tanto evidencia_url como el arreglo completo de evidencias
       try {
         const res = await fetchJson('/reportes', {
           method: 'POST',
@@ -1590,17 +1608,25 @@ export const ApiService = {
             ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
             descripcion_hechos: params.descripcionHechos,
             evidencia_url: finalUrls[0] || null,
+            evidencias_urls: finalUrls,
+            evidencias: processedEvidencias,
             numero_reincidencia: nuevoNivel,
             fecha_fin: fechaFinStr,
           }),
         });
         if (res && res.id_reporte) {
-          resReporteId = res.id_reporte;
+          resReporteId = Number(res.id_reporte);
           createdViaBackend = true;
+          backendInsertedCount =
+            typeof res.evidencias_insertadas === 'number'
+              ? res.evidencias_insertadas
+              : finalUrls.length > 0
+                ? 1
+                : 0;
         }
       } catch { }
 
-      // Fallback Supabase si no hubo respuesta del servidor Express, o solo para evidencias adicionales (>1 foto)
+      // 3. Fallback en Supabase o inserción de las evidencias restantes en la tabla evidencias
       if (isSupabaseConfigured()) {
         try {
           if (!resReporteId) {
@@ -1613,36 +1639,41 @@ export const ApiService = {
                 id_usuario: params.idUsuario,
                 ubicacion_texto: params.ubicacionTexto || 'Recorrido Residencial',
                 descripcion_hechos: params.descripcionHechos,
-                estatus_revision: 'pendiente',
+                estatus_revision: 'PENDIENTE',
               })
               .select('id_reporte')
               .single();
 
             if (repData && repData.id_reporte) {
-              resReporteId = repData.id_reporte;
+              resReporteId = Number(repData.id_reporte);
             }
           }
 
-          // Si el backend ya creó el reporte, él ya insertó la 1ª evidencia (finalUrls[0]); solo insertamos adicionales para no duplicar filas
+          // Insertar las evidencias que aún no hayan sido registradas por el backend
           const evidenciasPendientes = createdViaBackend
-            ? processedEvidencias.slice(1)
+            ? processedEvidencias.slice(backendInsertedCount)
             : processedEvidencias;
 
           if (resReporteId && evidenciasPendientes.length > 0) {
-            const rowsToInsert = evidenciasPendientes.map((ev) => ({
-              id_reporte: resReporteId,
-              archivo: ev.fotoUrl,
-              descripcion: ev.descripcion || 'Fotografía de evidencia levantada por oficial.',
-              fecha_captura: ev.fechaHora || now.toISOString(),
-              id_usuario: params.idUsuario,
-              activa: true,
-            }));
+            const rowsToInsert = evidenciasPendientes.map((ev, idx) => {
+              const numFoto = (createdViaBackend ? backendInsertedCount : 0) + idx + 1;
+              return {
+                id_reporte: resReporteId,
+                archivo: ev.fotoUrl,
+                descripcion:
+                  ev.descripcion ||
+                  `Evidencia fotográfica ${numFoto} de ${processedEvidencias.length} (Reporte #${resReporteId})`,
+                fecha_captura: ev.fechaHora || now.toISOString(),
+                id_usuario: Number(params.idUsuario) || 1,
+                activa: true,
+              };
+            });
 
             // Un solo request HTTP batch y sin .select() de retorno (0 bytes de Egress)
             await (supabase as any).from('evidencias').insert(rowsToInsert);
           }
         } catch (supabaseInsertErr) {
-          console.warn('[ApiService] Error al insertar reporte/evidencias en Supabase:', supabaseInsertErr);
+          console.warn('[ApiService] Error al insertar evidencias en Supabase:', supabaseInsertErr);
         }
       }
 
@@ -1672,7 +1703,7 @@ export const ApiService = {
       }
 
       if (resReporteId) {
-        return { idReporte: resReporteId };
+        return { idReporte: resReporteId, evidencias: processedEvidencias };
       }
       return null;
     } catch (e) {

@@ -558,6 +558,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     let dbReporteId: number | null = null;
+    let uploadedEvidencias: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }> | null = null;
     const isOnline = await isNetworkConnected();
 
     // Si hay internet, intentar guardar de inmediato en el servidor
@@ -566,6 +567,9 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const dbRes = await SupabaseService.crearReporteInfraccion(payloadParams);
         if (dbRes?.idReporte) {
           dbReporteId = dbRes.idReporte;
+          if (dbRes.evidencias && dbRes.evidencias.length > 0) {
+            uploadedEvidencias = dbRes.evidencias;
+          }
         }
       } catch (e) {
         console.warn('[MobileContext] Error guardando directamente en Supabase:', e);
@@ -586,6 +590,16 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       estado: 'pendiente',
       agenteId: agenteActual.id,
       isOfflinePending: isOffline,
+      evidencias:
+        uploadedEvidencias && uploadedEvidencias.length > 0
+          ? uploadedEvidencias.map((ev, idx) => ({
+              id: nuevo.evidencias?.[idx]?.id || `ev_${dbReporteId}_${idx + 1}`,
+              fotoUrl: ev.fotoUrl,
+              descripcion: ev.descripcion || nuevo.evidencias?.[idx]?.descripcion || '',
+              fechaHora: ev.fechaHora || nuevo.evidencias?.[idx]?.fechaHora || now.toISOString(),
+              isPrincipal: idx === 0,
+            }))
+          : nuevo.evidencias,
       historial: [
         {
           id: `hist_${Date.now()}`,
