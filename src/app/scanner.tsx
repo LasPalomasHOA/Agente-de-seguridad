@@ -24,7 +24,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
 import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
 import { getLocalDateStr, getLocalTimeStr } from '../services/apiService';
-import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow, BitacoraAccesoRow } from '../types/database';
+import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow, BitacoraAccesoRow, ReglaReincidenciaRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
 import { comprimirImagen } from '../services/imageService';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
@@ -217,6 +217,22 @@ export default function ScannerScreen() {
       setNowTick(Date.now());
     }, 15000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Carga reactiva de las reglas de reincidencia vigentes editadas por supervisión
+  const [reglasReincidencia, setReglasReincidencia] = useState<ReglaReincidenciaRow[]>([]);
+  useEffect(() => {
+    let active = true;
+    SupabaseService.getReglasReincidencia(true)
+      .then((res) => {
+        if (active && Array.isArray(res) && res.length > 0) {
+          setReglasReincidencia(res);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Sync default infraccion when catalog loads
@@ -688,12 +704,13 @@ export default function ScannerScreen() {
         const finMs = parseSqlUtcDate(s.fecha_fin);
         return ahoraMs < finMs;
       }
-      if (nivelS === 2) {
-        const finMs = inicioMs + 24 * 60 * 60 * 1000;
-        return ahoraMs < finMs;
-      }
-      if (nivelS === 3) {
-        const finMs = inicioMs + 7 * 24 * 60 * 60 * 1000;
+      const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
+      const h = reglaS?.horas_suspension !== undefined && reglaS?.horas_suspension !== null
+        ? Number(reglaS.horas_suspension)
+        : (nivelS === 2 ? 24 : (nivelS === 3 ? 168 : (nivelS === 1 ? 0 : -1)));
+
+      if (h > 0) {
+        const finMs = inicioMs + h * 60 * 60 * 1000;
         return ahoraMs < finMs;
       }
       return true;
@@ -741,16 +758,111 @@ export default function ScannerScreen() {
     );
     const fechaInicioMs = parseSqlUtcDate(sancion.fecha_inicio || (sancion as any).created_at);
 
-    // ─── 1ª FALTA: Llamado de atención (Banner amarillo informativo, acceso permitido) ───
-    if (nivel === 1) {
+    // Buscar regla configurada para este nivel en la matriz oficial del HOA
+    const reglaConfig = (reglasReincidencia || []).find((r) => r.numero_falta === nivel);
+
+    // Determinar horas de suspensión configuradas
+    let horasSuspension = reglaConfig?.horas_suspension;
+    if (horasSuspension === undefined || horasSuspension === null) {
+      if (sancion.fecha_fin) {
+        const finMs = parseSqlUtcDate(sancion.fecha_fin);
+        horasSuspension = Math.max(0, Math.round((finMs - fechaInicioMs) / (1000 * 60 * 60)));
+      } else {
+        if (nivel === 1) horasSuspension = 0;
+        else if (nivel === 2) horasSuspension = 24;
+        else if (nivel === 3) horasSuspension = 168;
+        else horasSuspension = -1;
+      }
+    }
+
+    const permiteAcceso = reglaConfig !== undefined
+      ? Boolean(reglaConfig.permite_acceso)
+      : (horasSuspension === 0 && !sancion.fecha_fin);
+    const requiresAdmin = Boolean(reglaConfig?.requiere_administrador || horasSuspension === -1 || nivel >= 4);
+
+    // Calcular fecha_fin efectiva
+    let fechaFinMs: number | null = null;
+    if (sancion.fecha_fin) {
+      fechaFinMs = parseSqlUtcDate(sancion.fecha_fin);
+    } else if (horasSuspension > 0) {
+      fechaFinMs = fechaInicioMs + horasSuspension * 60 * 60 * 1000;
+    }
+
+    // ─── CASO 1: Bloqueo Permanente / Lista Negra ───
+    if (horasSuspension === -1 || (requiresAdmin && !fechaFinMs)) {
+      return {
+        isBlocked: true,
+        isWarning: false,
+        level: Math.max(nivel, 4),
+        levelTitle: 'ACCESO RESTRINGIDO PERMANENTE',
+        levelBadge: 'LISTA NEGRA',
+        levelName: `Nivel ${nivel} - Bloqueo Permanente`,
+        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Acceso vehicular restringido permanentemente por reincidencia.',
+        timeRemainingText: 'Permanente',
+        fechaFinText: 'Indefinido (Requiere Comité HOA)',
+        requiresAdmin: true,
+        badgeBg: '#991B1B',
+      };
+    }
+
+    // ─── CASO 2: Suspensión Temporal Activa (Horas configuradas vigentes) ───
+    if (fechaFinMs && ahoraMs < fechaFinMs) {
+      const refStartMs = Math.max(ahoraMs, fechaInicioMs);
+      const diffMs = Math.max(0, fechaFinMs - refStartMs);
+      const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+
+      const timeRemainingText =
+        totalDays > 0
+          ? `${totalDays}d ${totalHours}h restantes`
+          : totalHours > 0
+            ? `${totalHours}h ${totalMinutes}m restantes`
+            : `${totalMinutes}m restantes`;
+
+      const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
+      const titleText =
+        duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
+          ? `SUSPENSIÓN TEMPORAL (${duracionTotalHoras / 24} ${duracionTotalHoras / 24 === 1 ? 'DÍA' : 'DÍAS'})`
+          : `SUSPENSIÓN TEMPORAL (${duracionTotalHoras} HORAS)`;
+      const badgeText =
+        duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
+          ? `SUSPENSIÓN ${duracionTotalHoras / 24}D`
+          : `SUSPENSIÓN ${duracionTotalHoras}H`;
+
+      const finDate = new Date(fechaFinMs);
+      const fechaFinText = `${finDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${finDate.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
+
+      return {
+        isBlocked: true,
+        isWarning: false,
+        level: nivel,
+        levelTitle: titleText,
+        levelBadge: badgeText,
+        levelName: `${nivel}ª Falta - Suspensión Temporal (${duracionTotalHoras}h)`,
+        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || `Falta nivel ${nivel}: suspensión vehicular reglamentaria por ${duracionTotalHoras} horas.`,
+        timeRemainingText,
+        fechaFinText,
+        requiresAdmin,
+        badgeBg: nivel >= 3 ? '#DC2626' : (nivel === 2 ? '#EA580C' : '#D97706'),
+      };
+    }
+
+    // ─── CASO 3: Si ya expiró la suspensión temporal ───
+    if (fechaFinMs && ahoraMs >= fechaFinMs) {
+      return null; // Expirada automáticamente
+    }
+
+    // ─── CASO 4: Llamado de atención informativo (Sin suspensión, acceso permitido) ───
+    if (permiteAcceso && (horasSuspension === 0 || !horasSuspension)) {
       return {
         isBlocked: false,
         isWarning: true,
-        level: 1,
-        levelTitle: '1ª Falta: Llamado de Atención',
-        levelBadge: '1ª FALTA',
-        levelName: '1ª Falta - Llamado de Atención',
-        motivo: sancion.motivo || 'Primer llamado de atención registrado en el sistema.',
+        level: nivel,
+        levelTitle: `${nivel}ª Falta: Llamado de Atención`,
+        levelBadge: `${nivel}ª FALTA`,
+        levelName: `${nivel}ª Falta - Llamado de Atención`,
+        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Llamado de atención formal registrado en el sistema. Acceso permitido.',
         timeRemainingText: 'Informativo',
         fechaFinText: 'Acceso Permitido',
         requiresAdmin: false,
@@ -758,108 +870,21 @@ export default function ScannerScreen() {
       };
     }
 
-    // ─── 2ª FALTA: Suspensión temporal (Duración dinámica según reglas HOA) ───
-    if (nivel === 2) {
-      const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 24 * 60 * 60 * 1000;
-
-      if (ahoraMs < fechaFinMs) {
-        const refStartMs = Math.max(ahoraMs, fechaInicioMs);
-        const diffMs = Math.max(0, fechaFinMs - refStartMs);
-        const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
-        const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-        const timeRemainingText =
-          totalHours > 0 ? `${totalHours}h ${totalMinutes}m restantes` : `${totalMinutes}m restantes`;
-
-        const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
-        const titleText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
-          ? `SUSPENSIÓN TEMPORAL (${duracionTotalHoras / 24} ${duracionTotalHoras / 24 === 1 ? 'DÍA' : 'DÍAS'})`
-          : `SUSPENSIÓN TEMPORAL (${duracionTotalHoras} HORAS)`;
-        const badgeText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
-          ? `SUSPENSIÓN ${duracionTotalHoras / 24}D`
-          : `SUSPENSIÓN ${duracionTotalHoras}H`;
-
-        const finDate = new Date(fechaFinMs);
-        const fechaFinText = `${finDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${finDate.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
-
-        return {
-          isBlocked: true,
-          isWarning: false,
-          level: 2,
-          levelTitle: titleText,
-          levelBadge: badgeText,
-          levelName: `2ª Falta - Suspensión Temporal (${duracionTotalHoras}h)`,
-          motivo: sancion.motivo || `Segunda infracción: suspensión vehicular reglamentaria por ${duracionTotalHoras} horas.`,
-          timeRemainingText,
-          fechaFinText,
-          requiresAdmin: false,
-          badgeBg: '#EA580C',
-        };
-      }
-      // Ya transcurrió la penalización -> Suspensión expirada automáticamente
-      return null;
-    }
-
-    // ─── 3ª FALTA: Suspensión extendida (Duración dinámica según reglas HOA) ───
-    if (nivel === 3) {
-      const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
-
-      if (ahoraMs < fechaFinMs) {
-        const refStartMs = Math.max(ahoraMs, fechaInicioMs);
-        const diffMs = Math.max(0, fechaFinMs - refStartMs);
-        const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-        const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-        const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-        const timeRemainingText =
-          totalDays > 0
-            ? `${totalDays}d ${totalHours}h restantes`
-            : totalHours > 0
-              ? `${totalHours}h ${totalMinutes}m restantes`
-              : `${totalMinutes}m restantes`;
-
-        const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
-        const titleText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
-          ? `SUSPENSIÓN TEMPORAL (${duracionTotalHoras / 24} ${duracionTotalHoras / 24 === 1 ? 'DÍA' : 'DÍAS'})`
-          : `SUSPENSIÓN TEMPORAL (${duracionTotalHoras} HORAS)`;
-        const badgeText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
-          ? `SUSPENSIÓN ${duracionTotalHoras / 24}D`
-          : `SUSPENSIÓN ${duracionTotalHoras}H`;
-
-        const finDate = new Date(fechaFinMs);
-        const fechaFinText = `${finDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${finDate.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
-
-        return {
-          isBlocked: true,
-          isWarning: false,
-          level: 3,
-          levelTitle: titleText,
-          levelBadge: badgeText,
-          levelName: `3ª Falta - Suspensión Temporal (${duracionTotalHoras}h)`,
-          motivo: sancion.motivo || `Tercera infracción: suspensión vehicular reglamentaria por ${duracionTotalHoras} horas.`,
-          timeRemainingText,
-          fechaFinText,
-          requiresAdmin: false,
-          badgeBg: '#DC2626',
-        };
-      }
-      // Ya transcurrió la penalización -> Suspensión expirada automáticamente
-      return null;
-    }
-
-    // ─── 4ª FALTA O MÁS: Acceso restringido permanente (Lista Negra) ───
+    // Por defecto (si no permite acceso y no hay fechaFinMs)
     return {
       isBlocked: true,
       isWarning: false,
-      level: nivel >= 4 ? nivel : 4,
-      levelTitle: 'ACCESO RESTRINGIDO PERMANENTE',
-      levelBadge: 'LISTA NEGRA',
-      levelName: `Nivel ${nivel} - Lista Negra Permanente`,
-      motivo: sancion.motivo || 'Acceso vehicular restringido permanentemente por reincidencia.',
-      timeRemainingText: 'Permanente',
-      fechaFinText: 'Indefinido (Requiere Comité HOA)',
-      requiresAdmin: true,
-      badgeBg: '#991B1B',
+      level: nivel,
+      levelTitle: 'ACCESO NO AUTORIZADO',
+      levelBadge: 'DENEGADO',
+      levelName: `${nivel}ª Falta - Acceso Denegado`,
+      motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Acceso vehicular no autorizado por normativa HOA.',
+      timeRemainingText: 'Suspendido',
+      fechaFinText: 'Acceso Restringido',
+      requiresAdmin,
+      badgeBg: '#DC2626',
     };
-  }, [selectedVehicle, selectedCorbatin, sancionesActivas, nowTick]);
+  }, [selectedVehicle, selectedCorbatin, sancionesActivas, nowTick, reglasReincidencia]);
 
   const isSuspended = !!evaluacionSancion?.isBlocked;
   const hasWarningLevel1 = !!evaluacionSancion?.isWarning;
