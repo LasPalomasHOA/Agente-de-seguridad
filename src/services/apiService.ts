@@ -1485,14 +1485,28 @@ export const ApiService = {
         try {
           const data = await fetchJson('/reglas');
           if (Array.isArray(data)) {
-            return data.map((r: any) => ({
-              id_regla: r.id_regla,
-              numero_falta: r.numero_falta,
-              permite_acceso: r.permite_acceso ?? true,
-              requiere_administrador: r.requiere_administrador ?? false,
-              mensaje_alerta: r.mensaje_alerta || '',
-              activo: r.activo ?? true,
-            }));
+            return data.map((r: any) => {
+              let h = r.horas_suspension;
+              if (h === undefined || h === null) {
+                const match = (r.mensaje_alerta || '').match(/\[HORAS:(-?\d+)\]/);
+                if (match) h = parseInt(match[1], 10);
+                else {
+                  if (r.numero_falta === 1) h = 0;
+                  else if (r.numero_falta === 2) h = 24;
+                  else if (r.numero_falta === 3) h = 168;
+                  else h = -1;
+                }
+              }
+              return {
+                id_regla: r.id_regla,
+                numero_falta: r.numero_falta,
+                permite_acceso: r.permite_acceso ?? true,
+                requiere_administrador: r.requiere_administrador ?? false,
+                mensaje_alerta: (r.mensaje_alerta || '').replace(/\[HORAS:(-?\d+)\]\s*/g, ''),
+                horas_suspension: Number(h),
+                activo: r.activo ?? true,
+              };
+            });
           }
 
         } catch {
@@ -1503,7 +1517,28 @@ export const ApiService = {
               .eq('activo', true)
               .limit(20);
             if (data && Array.isArray(data)) {
-              return data as unknown as ReglaReincidenciaRow[];
+              return (data as any[]).map((r: any) => {
+                let h = r.horas_suspension;
+                if (h === undefined || h === null) {
+                  const match = (r.mensaje_alerta || '').match(/\[HORAS:(-?\d+)\]/);
+                  if (match) h = parseInt(match[1], 10);
+                  else {
+                    if (r.numero_falta === 1) h = 0;
+                    else if (r.numero_falta === 2) h = 24;
+                    else if (r.numero_falta === 3) h = 168;
+                    else h = -1;
+                  }
+                }
+                return {
+                  id_regla: r.id_regla,
+                  numero_falta: r.numero_falta,
+                  permite_acceso: r.permite_acceso ?? true,
+                  requiere_administrador: r.requiere_administrador ?? false,
+                  mensaje_alerta: (r.mensaje_alerta || '').replace(/\[HORAS:(-?\d+)\]\s*/g, ''),
+                  horas_suspension: Number(h),
+                  activo: r.activo ?? true,
+                };
+              });
             }
           }
         }
@@ -1536,15 +1571,23 @@ export const ApiService = {
       // Calcular nivel de reincidencia con la cuenta local/cacheada existente (0 bytes egress adicional)
       const prevCount = await this.getReportesCount({ idVehiculo: params.idVehiculo }).catch(() => 0);
       const nuevoNivel = Math.min(prevCount + 1, 4);
+
+      // Consultar dinámicamente las reglas de reincidencia para respetar las horas configuradas por el supervisor
+      const reglas = await this.getReglasReincidencia().catch(() => []);
+      const reglaNivel = reglas.find((r) => r.numero_falta === nuevoNivel);
+      let horasSuspension = reglaNivel?.horas_suspension;
+      if (horasSuspension === undefined || horasSuspension === null) {
+        if (nuevoNivel === 1) horasSuspension = 0;
+        else if (nuevoNivel === 2) horasSuspension = 24;
+        else if (nuevoNivel === 3) horasSuspension = 168;
+        else horasSuspension = -1;
+      }
+
       let fechaFinStr: string | null = null;
-      if (nuevoNivel === 1) {
-        fechaFinStr = null; // 1ª Falta: Llamado de atención
-      } else if (nuevoNivel === 2) {
-        fechaFinStr = new Date(fechaInicioSancion.getTime() + 24 * 60 * 60 * 1000).toISOString(); // 2ª Falta: 24 horas desde las 12:00 AM del día siguiente
-      } else if (nuevoNivel === 3) {
-        fechaFinStr = new Date(fechaInicioSancion.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 3ª Falta: 1 semana (7 días) desde las 12:00 AM del día siguiente
+      if (horasSuspension > 0) {
+        fechaFinStr = new Date(fechaInicioSancion.getTime() + horasSuspension * 60 * 60 * 1000).toISOString();
       } else {
-        fechaFinStr = null; // 4ª Falta: Definitiva
+        fechaFinStr = null; // 0 horas (Llamado de atención) o -1 (Definitiva/Permanente)
       }
 
       // 1. Subir primero todas las evidencias a Supabase Storage (en pendientes/ como antes, sin crear folders por reporte)

@@ -73,7 +73,7 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY, 
 export const PROJECTIONS = {
   CATALOGO_INFRACCIONES: 'id_infraccion, id_reglamento, codigo, nombre, descripcion, categoria, activo',
   REGLAMENTOS: 'id_reglamento, version, titulo, archivo_url, fecha_publicacion, vigente, created_at',
-  REGLAS_REINCIDENCIA: 'id_regla, numero_falta, permite_acceso, requiere_administrador, mensaje_alerta, activo',
+  REGLAS_REINCIDENCIA: 'id_regla, numero_falta, permite_acceso, requiere_administrador, mensaje_alerta, horas_suspension, activo',
   USUARIOS_LIGHT: 'id_usuario, nombre, correo, id_rol, activo',
   VEHICULOS_LIGHT: 'id_vehiculo, id_empresa, marca, modelo, a\u00f1o, placas, color, foto_url, estatus_acceso',
   CORBATINES_LIGHT: 'id_corbatin, id_vehiculo, numero, qr_token, fecha_emision, fecha_vencimiento, estatus',

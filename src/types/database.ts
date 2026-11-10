@@ -302,6 +302,7 @@ export interface ReglaReincidenciaRow {
   permite_acceso: boolean;
   requiere_administrador: boolean;
   mensaje_alerta: string;
+  horas_suspension?: number | null;
   activo: boolean;
 }
 

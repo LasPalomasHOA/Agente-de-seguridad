@@ -684,17 +684,17 @@ export default function ScannerScreen() {
     const sancionesEnVigor = (sancionesActivas || []).filter((s) => {
       const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
       const inicioMs = parseSqlUtcDate(s.fecha_inicio || (s as any).created_at);
+      if (s.fecha_fin) {
+        const finMs = parseSqlUtcDate(s.fecha_fin);
+        return ahoraMs < finMs;
+      }
       if (nivelS === 2) {
-        const finMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : inicioMs + 24 * 60 * 60 * 1000;
+        const finMs = inicioMs + 24 * 60 * 60 * 1000;
         return ahoraMs < finMs;
       }
       if (nivelS === 3) {
-        const finMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : inicioMs + 7 * 24 * 60 * 60 * 1000;
+        const finMs = inicioMs + 7 * 24 * 60 * 60 * 1000;
         return ahoraMs < finMs;
-      }
-      if (s.fecha_fin && nivelS < 4) {
-        const finMs = parseSqlUtcDate(s.fecha_fin);
-        if (ahoraMs >= finMs) return false;
       }
       return true;
     });
@@ -758,7 +758,7 @@ export default function ScannerScreen() {
       };
     }
 
-    // ─── 2ª FALTA: Suspensión temporal de 24 horas (1 Día) ───
+    // ─── 2ª FALTA: Suspensión temporal (Duración dinámica según reglas HOA) ───
     if (nivel === 2) {
       const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 24 * 60 * 60 * 1000;
 
@@ -770,29 +770,36 @@ export default function ScannerScreen() {
         const timeRemainingText =
           totalHours > 0 ? `${totalHours}h ${totalMinutes}m restantes` : `${totalMinutes}m restantes`;
 
+        const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
+        const titleText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
+          ? `SUSPENSIÓN TEMPORAL (${duracionTotalHoras / 24} ${duracionTotalHoras / 24 === 1 ? 'DÍA' : 'DÍAS'})`
+          : `SUSPENSIÓN TEMPORAL (${duracionTotalHoras} HORAS)`;
+        const badgeText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
+          ? `SUSPENSIÓN ${duracionTotalHoras / 24}D`
+          : `SUSPENSIÓN ${duracionTotalHoras}H`;
+
+        const finDate = new Date(fechaFinMs);
+        const fechaFinText = `${finDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${finDate.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
+
         return {
           isBlocked: true,
           isWarning: false,
           level: 2,
-          levelTitle: 'SUSPENSIÓN TEMPORAL (24 HORAS)',
-          levelBadge: 'SUSPENSIÓN 24H',
-          levelName: '2ª Falta - Suspensión de 1 Día',
-          motivo: sancion.motivo || 'Segunda infracción: suspensión vehicular reglamentaria por 24 horas.',
+          levelTitle: titleText,
+          levelBadge: badgeText,
+          levelName: `2ª Falta - Suspensión Temporal (${duracionTotalHoras}h)`,
+          motivo: sancion.motivo || `Segunda infracción: suspensión vehicular reglamentaria por ${duracionTotalHoras} horas.`,
           timeRemainingText,
-          fechaFinText: new Date(fechaFinMs).toLocaleDateString('es-MX', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric',
-          }),
+          fechaFinText,
           requiresAdmin: false,
           badgeBg: '#EA580C',
         };
       }
-      // Ya transcurrieron las 24 horas -> Suspensión expirada automáticamente
+      // Ya transcurrió la penalización -> Suspensión expirada automáticamente
       return null;
     }
 
-    // ─── 3ª FALTA: Suspensión de 1 semana (Bloqueo reglamentario de 7 días dinámico) ───
+    // ─── 3ª FALTA: Suspensión extendida (Duración dinámica según reglas HOA) ───
     if (nivel === 3) {
       const fechaFinMs = sancion.fecha_fin ? parseSqlUtcDate(sancion.fecha_fin) : fechaInicioMs + 7 * 24 * 60 * 60 * 1000;
 
@@ -809,25 +816,32 @@ export default function ScannerScreen() {
               ? `${totalHours}h ${totalMinutes}m restantes`
               : `${totalMinutes}m restantes`;
 
+        const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
+        const titleText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
+          ? `SUSPENSIÓN TEMPORAL (${duracionTotalHoras / 24} ${duracionTotalHoras / 24 === 1 ? 'DÍA' : 'DÍAS'})`
+          : `SUSPENSIÓN TEMPORAL (${duracionTotalHoras} HORAS)`;
+        const badgeText = duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
+          ? `SUSPENSIÓN ${duracionTotalHoras / 24}D`
+          : `SUSPENSIÓN ${duracionTotalHoras}H`;
+
+        const finDate = new Date(fechaFinMs);
+        const fechaFinText = `${finDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${finDate.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
+
         return {
           isBlocked: true,
           isWarning: false,
           level: 3,
-          levelTitle: 'SUSPENSIÓN TEMPORAL (7 DÍAS)',
-          levelBadge: 'SUSPENSIÓN 7 DÍAS',
-          levelName: '3ª Falta - Suspensión de 1 Semana',
-          motivo: sancion.motivo || 'Tercera infracción: suspensión vehicular reglamentaria por 7 días.',
+          levelTitle: titleText,
+          levelBadge: badgeText,
+          levelName: `3ª Falta - Suspensión Temporal (${duracionTotalHoras}h)`,
+          motivo: sancion.motivo || `Tercera infracción: suspensión vehicular reglamentaria por ${duracionTotalHoras} horas.`,
           timeRemainingText,
-          fechaFinText: new Date(fechaFinMs).toLocaleDateString('es-MX', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric',
-          }),
+          fechaFinText,
           requiresAdmin: false,
           badgeBg: '#DC2626',
         };
       }
-      // Ya transcurrieron los 7 días -> Suspensión expirada automáticamente
+      // Ya transcurrió la penalización -> Suspensión expirada automáticamente
       return null;
     }
 
