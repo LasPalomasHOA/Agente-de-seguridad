@@ -694,23 +694,37 @@ export default function ScannerScreen() {
     const estatusCorbatin = (selectedCorbatin?.estatus || '').toLowerCase();
     const ahoraMs = nowTick;
 
-    // Filtrar sanciones activas que no hayan expirado.
-    // NOTA: No se descartan las sanciones con fecha_inicio programada a la medianoche siguiente (ahoraMs < inicioMs)
-    // para que toda sanción aprobada por supervisión se refleje de inmediato al escanear el vehículo.
+    // Normaliza la fecha de inicio al estándar reglamentario (12:00 AM del día siguiente si tenía hora distinta a 00:00:00)
+    const normalizarInicioSancionMs = (rawInicio?: string | null): number => {
+      const ms = parseSqlUtcDate(rawInicio);
+      const d = new Date(ms);
+      if (isNaN(d.getTime())) return ms;
+      if (d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0) {
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+      }
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
+    };
+
+    const calcularFinMs = (s: SancionDbRow, inicioMs: number, nivelS: number): number | null => {
+      const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
+      if (reglaS && reglaS.horas_suspension !== undefined && reglaS.horas_suspension !== null) {
+        const h = Number(reglaS.horas_suspension);
+        if (h === -1 || h === 0) return null;
+        if (h > 0) return inicioMs + h * 60 * 60 * 1000;
+      }
+      if (s.fecha_fin) {
+        return parseSqlUtcDate(s.fecha_fin);
+      }
+      const defHoras = nivelS === 2 ? 24 : (nivelS === 3 ? 168 : (nivelS === 1 ? 0 : -1));
+      return defHoras > 0 ? inicioMs + defHoras * 60 * 60 * 1000 : null;
+    };
+
+    // Filtrar sanciones activas que no hayan expirado según inicio 12:00 AM + horas editables de la regla
     const sancionesEnVigor = (sancionesActivas || []).filter((s) => {
       const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
-      const inicioMs = parseSqlUtcDate(s.fecha_inicio || (s as any).created_at);
-      if (s.fecha_fin) {
-        const finMs = parseSqlUtcDate(s.fecha_fin);
-        return ahoraMs < finMs;
-      }
-      const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
-      const h = reglaS?.horas_suspension !== undefined && reglaS?.horas_suspension !== null
-        ? Number(reglaS.horas_suspension)
-        : (nivelS === 2 ? 24 : (nivelS === 3 ? 168 : (nivelS === 1 ? 0 : -1)));
-
-      if (h > 0) {
-        const finMs = inicioMs + h * 60 * 60 * 1000;
+      const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
+      const finMs = calcularFinMs(s, inicioMs, nivelS);
+      if (finMs !== null) {
         return ahoraMs < finMs;
       }
       return true;
@@ -756,7 +770,7 @@ export default function ScannerScreen() {
       Number(sancion.numero_reincidencia) || 1,
       Number(sancion.id_regla) || 1
     );
-    const fechaInicioMs = parseSqlUtcDate(sancion.fecha_inicio || (sancion as any).created_at);
+    const fechaInicioMs = normalizarInicioSancionMs(sancion.fecha_inicio || (sancion as any).created_at);
 
     // Buscar regla configurada para este nivel en la matriz oficial del HOA
     const reglaConfig = (reglasReincidencia || []).find((r) => r.numero_falta === nivel);
@@ -780,12 +794,28 @@ export default function ScannerScreen() {
       : (horasSuspension === 0 && !sancion.fecha_fin);
     const requiresAdmin = Boolean(reglaConfig?.requiere_administrador || horasSuspension === -1 || nivel >= 4);
 
-    // Calcular fecha_fin efectiva
-    let fechaFinMs: number | null = null;
-    if (sancion.fecha_fin) {
-      fechaFinMs = parseSqlUtcDate(sancion.fecha_fin);
-    } else if (horasSuspension > 0) {
-      fechaFinMs = fechaInicioMs + horasSuspension * 60 * 60 * 1000;
+    // Calcular fecha_fin efectiva priorizando siempre las horas editables de la regla desde las 12:00 AM de inicio
+    const fechaFinMs = calcularFinMs(sancion, fechaInicioMs, nivel);
+
+    // ─── CASO 0: Sanción programada que aún no llega a su fecha de inicio (12:00 AM del día siguiente) ───
+    if (ahoraMs < fechaInicioMs) {
+      const inicioDate = new Date(fechaInicioMs);
+      const inicioLabel = inicioDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      return {
+        isBlocked: false,
+        isWarning: true,
+        level: nivel,
+        levelTitle: `${nivel}ª Falta Programada (Inicia 12:00 AM)`,
+        levelBadge: `INICIA ${inicioLabel}`,
+        levelName: `${nivel}ª Falta - Entra en vigor el ${inicioLabel} a las 12:00 AM`,
+        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || `Sanción programada para iniciar el ${inicioLabel} a las 12:00 AM.`,
+        timeRemainingText: `Inicia ${inicioLabel} 12:00 AM`,
+        fechaFinText: fechaFinMs
+          ? `Hasta ${new Date(fechaFinMs).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${new Date(fechaFinMs).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`
+          : 'Acceso Permitido Hasta Medianoche',
+        requiresAdmin: false,
+        badgeBg: '#D97706',
+      };
     }
 
     // ─── CASO 1: Bloqueo Permanente / Lista Negra ───
