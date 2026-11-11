@@ -432,7 +432,13 @@ export default function ScannerScreen() {
     }
     setMode('loading');
     try {
-      const res = await SupabaseService.buscarCorbatin(cleanCode);
+      const [res, liveReglas] = await Promise.all([
+        SupabaseService.buscarCorbatin(cleanCode),
+        online ? SupabaseService.getReglasReincidencia(true).catch(() => null) : Promise.resolve(null),
+      ]);
+      if (Array.isArray(liveReglas) && liveReglas.length > 0) {
+        setReglasReincidencia(liveReglas);
+      }
       if (res && (res.vehiculo || res.corbatin)) {
         // Si el vehículo no trae foto en memoria y estamos online, pedirla de forma puntual y cacheada
         if (res.vehiculo && !res.vehiculo.foto_url && res.vehiculo.id_vehiculo && online) {
@@ -707,38 +713,38 @@ export default function ScannerScreen() {
     const estatusCorbatin = (selectedCorbatin?.estatus || '').toLowerCase();
     const ahoraMs = nowTick;
 
-    // Normaliza la fecha de inicio al estándar reglamentario (7:00 AM del día siguiente en hora local)
+    // Parsea la fecha de inicio real de la sanción sin desplazar al día siguiente sanciones que ya están activas
     const normalizarInicioSancionMs = (rawInicio?: string | null): number => {
       const ms = parseSqlUtcDate(rawInicio);
       const d = new Date(ms);
       if (isNaN(d.getTime())) return ms;
-      // Si ya viene programada a las 07:00:00 AM (calculada por el backend para el día siguiente a las 7:00 AM), respetarla tal cual sin sumar otro día
-      if (d.getHours() === 7 && d.getMinutes() === 0 && d.getSeconds() === 0) {
+      // Solo si venía programada a medianoche exacta (00:00:00) en una fecha futura, ajustar a las 7:00 AM de ese mismo día
+      if (ms > ahoraMs && d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0) {
         return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 7, 0, 0, 0).getTime();
       }
-      // Si venía normalizada al estándar anterior de 00:00:00 (12:00 AM del día siguiente), ajustar a las 7:00 AM de ese mismo día
-      if (d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0) {
-        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 7, 0, 0, 0).getTime();
-      }
-      // Si tenía la hora exacta del momento de aprobación, programar para el día siguiente a las 7:00 AM hora local
-      return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 7, 0, 0, 0).getTime();
+      return ms;
     };
 
     const calcularFinMs = (s: SancionDbRow, inicioMs: number, nivelS: number): number | null => {
+      const dbFinMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : null;
       const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
       if (reglaS && reglaS.horas_suspension !== undefined && reglaS.horas_suspension !== null) {
         const h = Number(reglaS.horas_suspension);
-        if (h === -1 || h === 0) return null;
+        if (h === -1) return null;
         if (h > 0) return inicioMs + h * 60 * 60 * 1000;
+        // Si la regla fue restablecida a 0h pero la sanción en BD ya tenía una fecha_fin de suspensión asignada, respetarla
+        if (h === 0) {
+          return dbFinMs && dbFinMs > inicioMs ? dbFinMs : null;
+        }
       }
-      if (s.fecha_fin) {
-        return parseSqlUtcDate(s.fecha_fin);
+      if (dbFinMs) {
+        return dbFinMs;
       }
       const defHoras = nivelS === 2 ? 24 : (nivelS === 3 ? 168 : (nivelS === 1 ? 0 : -1));
       return defHoras > 0 ? inicioMs + defHoras * 60 * 60 * 1000 : null;
     };
 
-    // Filtrar sanciones activas que no hayan expirado según inicio 7:00 AM + horas editables de la regla
+    // Filtrar sanciones activas que no hayan expirado
     const sancionesEnVigor = (sancionesActivas || []).filter((s) => {
       const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
       const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
@@ -749,15 +755,12 @@ export default function ScannerScreen() {
       return true;
     });
 
-    const tieneSancionesRegistradas = Boolean(sancionesActivas && sancionesActivas.length > 0);
-
     if (
       estatusCorbatin === 'cancelado' ||
       estatusCorbatin === 'suspendido' ||
       estatusVehiculo === 'denegado' ||
       estatusVehiculo === 'restringido' ||
-      estatusVehiculo === 'bloqueado' ||
-      (estatusVehiculo === 'suspendido' && !tieneSancionesRegistradas)
+      estatusVehiculo === 'bloqueado'
     ) {
       return {
         isBlocked: true,
@@ -775,6 +778,22 @@ export default function ScannerScreen() {
     }
 
     if (sancionesEnVigor.length === 0) {
+      // Si el vehículo tiene estatus SUSPENDIDO directamente en la base de datos aunque no tenga sanciones en vigor listadas
+      if (estatusVehiculo === 'suspendido') {
+        return {
+          isBlocked: true,
+          isWarning: false,
+          level: 2,
+          levelTitle: 'SUSPENSIÓN VEHICULAR ACTIVA',
+          levelBadge: 'SUSPENDIDO',
+          levelName: 'Unidad con Estatus Suspendido en Sistema HOA',
+          motivo: 'El vehículo se encuentra registrado con estatus SUSPENDIDO en la base de datos.',
+          timeRemainingText: 'Suspendido',
+          fechaFinText: 'Sujeto a liberación HOA',
+          requiresAdmin: false,
+          badgeBg: '#DC2626',
+        };
+      }
       return null;
     }
 
@@ -794,12 +813,18 @@ export default function ScannerScreen() {
     // Buscar regla configurada para este nivel en la matriz oficial del HOA
     const reglaConfig = (reglasReincidencia || []).find((r) => r.numero_falta === nivel);
 
-    // Determinar horas de suspensión configuradas
+    // Calcular fecha_fin efectiva respetando horas de regla o fecha_fin ya impuesta en BD
+    const fechaFinMs = calcularFinMs(sancion, fechaInicioMs, nivel);
+
+    // Determinar horas de suspensión configuradas o efectivas
     let horasSuspension = reglaConfig?.horas_suspension;
-    if (horasSuspension === undefined || horasSuspension === null) {
-      if (sancion.fecha_fin) {
-        const finMs = parseSqlUtcDate(sancion.fecha_fin);
-        horasSuspension = Math.max(0, Math.round((finMs - fechaInicioMs) / (1000 * 60 * 60)));
+    if (
+      horasSuspension === undefined ||
+      horasSuspension === null ||
+      (horasSuspension === 0 && fechaFinMs && fechaFinMs > fechaInicioMs)
+    ) {
+      if (fechaFinMs && fechaFinMs > fechaInicioMs) {
+        horasSuspension = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
       } else {
         if (nivel === 1) horasSuspension = 0;
         else if (nivel === 2) horasSuspension = 24;
@@ -808,16 +833,18 @@ export default function ScannerScreen() {
       }
     }
 
-    const permiteAcceso = reglaConfig !== undefined
-      ? Boolean(reglaConfig.permite_acceso)
-      : (horasSuspension === 0 && !sancion.fecha_fin);
+    const tieneSuspensionTemporalActiva = Boolean(fechaFinMs && ahoraMs < fechaFinMs);
+    const permiteAcceso =
+      estatusVehiculo === 'suspendido' || tieneSuspensionTemporalActiva
+        ? false
+        : reglaConfig !== undefined
+          ? Boolean(reglaConfig.permite_acceso)
+          : (horasSuspension === 0 && !sancion.fecha_fin);
     const requiresAdmin = Boolean(reglaConfig?.requiere_administrador || horasSuspension === -1 || nivel >= 4);
 
-    // Calcular fecha_fin efectiva priorizando siempre las horas editables de la regla desde las 7:00 AM de inicio
-    const fechaFinMs = calcularFinMs(sancion, fechaInicioMs, nivel);
-
     // ─── CASO 0: Sanción programada que aún no llega a su fecha de inicio (7:00 AM del día siguiente) ───
-    if (ahoraMs < fechaInicioMs) {
+    // NOTA: Si el vehículo en BD ya tiene estatus SUSPENDIDO, la suspensión ya está activa y NO debe mostrarse como programada
+    if (ahoraMs < fechaInicioMs && estatusVehiculo !== 'suspendido') {
       const inicioDate = new Date(fechaInicioMs);
       const inicioLabel = inicioDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' });
       return {
@@ -854,10 +881,10 @@ export default function ScannerScreen() {
       };
     }
 
-    // ─── CASO 2: Suspensión Temporal Activa (Horas configuradas vigentes) ───
+    // ─── CASO 2: Suspensión Temporal Activa (Horas configuradas o fecha_fin vigentes) ───
     if (fechaFinMs && ahoraMs < fechaFinMs) {
-      const refStartMs = Math.max(ahoraMs, fechaInicioMs);
-      const diffMs = Math.max(0, fechaFinMs - refStartMs);
+      const refStartMs = Math.min(ahoraMs, fechaInicioMs);
+      const diffMs = Math.max(0, fechaFinMs - ahoraMs);
       const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
       const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
       const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
@@ -869,7 +896,7 @@ export default function ScannerScreen() {
             ? `${totalHours}h ${totalMinutes}m restantes`
             : `${totalMinutes}m restantes`;
 
-      const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
+      const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - refStartMs) / (1000 * 60 * 60)));
       const titleText =
         duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
           ? `SUSPENSIÓN TEMPORAL (${duracionTotalHoras / 24} ${duracionTotalHoras / 24 === 1 ? 'DÍA' : 'DÍAS'})`
@@ -902,8 +929,8 @@ export default function ScannerScreen() {
       return null; // Expirada automáticamente
     }
 
-    // ─── CASO 4: Llamado de atención informativo (Sin suspensión, acceso permitido) ───
-    if (permiteAcceso && (horasSuspension === 0 || !horasSuspension)) {
+    // ─── CASO 4: Llamado de atención informativo (Sin suspensión, acceso permitido, y el vehículo NO está suspendido en BD) ───
+    if (permiteAcceso && (horasSuspension === 0 || !horasSuspension) && estatusVehiculo !== 'suspendido') {
       return {
         isBlocked: false,
         isWarning: true,
@@ -919,15 +946,15 @@ export default function ScannerScreen() {
       };
     }
 
-    // Por defecto (si no permite acceso y no hay fechaFinMs)
+    // Por defecto (si el vehículo está SUSPENDIDO en BD o la regla no permite acceso)
     return {
       isBlocked: true,
       isWarning: false,
       level: nivel,
-      levelTitle: 'ACCESO NO AUTORIZADO',
-      levelBadge: 'DENEGADO',
-      levelName: `${nivel}ª Falta - Acceso Denegado`,
-      motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Acceso vehicular no autorizado por normativa HOA.',
+      levelTitle: 'SUSPENSIÓN VEHICULAR ACTIVA',
+      levelBadge: 'SUSPENDIDO',
+      levelName: `${nivel}ª Falta - Acceso Vehicular Suspendido`,
+      motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Acceso vehicular suspendido por normativa HOA.',
       timeRemainingText: 'Suspendido',
       fechaFinText: 'Acceso Restringido',
       requiresAdmin,

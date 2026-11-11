@@ -933,9 +933,22 @@ export const ApiService = {
       for (const key of aliasKeys) {
         const cachedResult = apiCache.get<CorbatinLookupResult>(key, TTL_LOOKUPS);
         if (cachedResult && (cachedResult.vehiculo || cachedResult.corbatin)) {
-          // Consultar en vivo el último acceso y las sanciones activas (forzando refresh para reflejar aprobaciones inmediatas)
+          // Consultar en vivo el último acceso, sanciones activas y estatus actual del vehículo en BD
           try {
-            const [liveAcceso, liveSanciones] = await Promise.all([
+            const liveVehStatusPromise =
+              cachedResult.vehiculo?.id_vehiculo && isSupabaseConfigured()
+                ? Promise.resolve(
+                    supabase
+                      .from('vehiculos' as any)
+                      .select('id_vehiculo, estatus_acceso')
+                      .eq('id_vehiculo', cachedResult.vehiculo.id_vehiculo)
+                      .maybeSingle()
+                  )
+                    .then((r: any) => r?.data?.estatus_acceso || null)
+                    .catch(() => null)
+                : Promise.resolve(null);
+
+            const [liveAcceso, liveSanciones, liveEstatusAcceso] = await Promise.all([
               cachedResult.vehiculo?.id_vehiculo
                 ? this.getUltimoAcceso(
                   cachedResult.vehiculo.id_vehiculo,
@@ -946,7 +959,15 @@ export const ApiService = {
               cachedResult.vehiculo?.id_vehiculo
                 ? this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: true }).catch(() => [])
                 : Promise.resolve([]),
+              liveVehStatusPromise,
             ]);
+
+            if (liveEstatusAcceso && cachedResult.vehiculo) {
+              cachedResult.vehiculo = {
+                ...cachedResult.vehiculo,
+                estatus_acceso: String(liveEstatusAcceso).toLowerCase() as any,
+              };
+            }
 
             cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
             if (Array.isArray(liveSanciones)) {
@@ -2668,30 +2689,22 @@ export const ApiService = {
           : chronologicalNivel;
         const finalNivel = Math.min(Math.max(effectiveCount, 1), 4);
 
-        // Si el nivel se redujo respecto a un valor inflado en BD (ej. de 4 a 3 tras apelar una falta previa), ajustar fecha_fin
-        let adjustedFechaFin = s.fecha_fin;
-        if (finalNivel === 2 && !adjustedFechaFin && s.fecha_inicio) {
-          adjustedFechaFin = new Date(new Date(s.fecha_inicio).getTime() + 24 * 60 * 60 * 1000).toISOString();
-        } else if (finalNivel === 3 && !adjustedFechaFin && s.fecha_inicio) {
-          adjustedFechaFin = new Date(new Date(s.fecha_inicio).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-        } else if (finalNivel === 4 && adjustedFechaFin) {
-          adjustedFechaFin = null;
-        }
+        // Conservar la fecha_fin registrada en base de datos para no sobrescribir las reglas dinámicas del HOA
+        const adjustedFechaFin = s.fecha_fin || null;
 
-        // Auto-corregir en Supabase si el registro tenía un numero_reincidencia inflado por una apelación previa
+        // Auto-corregir en Supabase únicamente si el registro tenía un numero_reincidencia inflado por una apelación previa
         const storedNum = Number(s.numero_reincidencia) || 0;
         const storedRegla = Number(s.id_regla) || 0;
         if (
           isSupabaseConfigured() &&
           s.id_sancion &&
-          (storedNum !== finalNivel || storedRegla !== finalNivel || s.fecha_fin !== adjustedFechaFin)
+          (storedNum !== finalNivel || storedRegla !== finalNivel)
         ) {
           (supabase as any)
             .from('sanciones' as any)
             .update({
               numero_reincidencia: finalNivel,
               id_regla: finalNivel,
-              fecha_fin: adjustedFechaFin,
             })
             .eq('id_sancion', s.id_sancion)
             .then(() => { })
