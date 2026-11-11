@@ -1566,8 +1566,8 @@ export const ApiService = {
   } | null> {
     try {
       const now = new Date();
-      // La sanción entra en vigor al día siguiente a las 12:00 AM (hora local)
-      const fechaInicioSancion = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+      // La sanción entra en vigor al día siguiente a las 7:00 AM (hora local)
+      const fechaInicioSancion = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 7, 0, 0, 0);
       // Calcular nivel de reincidencia con la cuenta local/cacheada existente (0 bytes egress adicional)
       const prevCount = await this.getReportesCount({ idVehiculo: params.idVehiculo }).catch(() => 0);
       const nuevoNivel = Math.min(prevCount + 1, 4);
@@ -2026,12 +2026,25 @@ export const ApiService = {
       }
     }
 
+    const resolveIsoTimestamp = (primary?: any, rawIso?: any, fallbackIso?: any): string | null => {
+      for (const candidate of [rawIso, primary, fallbackIso]) {
+        if (candidate && typeof candidate === 'string' && candidate !== 'null' && candidate !== 'undefined') {
+          const clean = candidate.trim();
+          if (clean.includes('T') || (clean.includes('-') && clean.includes(':'))) {
+            return clean;
+          }
+        }
+      }
+      if (primary && typeof primary === 'string' && primary !== 'null' && primary !== 'undefined') {
+        return primary.trim();
+      }
+      return null;
+    };
+
     const resolveLocalFechaForAcceso = (row: any): string => {
       const refTs =
-        (row.hora_salida && row.hora_salida !== 'null' ? row.hora_salida : null) ||
-        (row.hora_entrada && row.hora_entrada !== 'null' ? row.hora_entrada : null) ||
-        row.updated_at ||
-        row.created_at;
+        resolveIsoTimestamp(row.hora_salida, row.raw_hora_salida, row.updated_at) ||
+        resolveIsoTimestamp(row.hora_entrada, row.raw_hora_entrada, row.created_at);
       if (refTs && typeof refTs === 'string' && (refTs.includes('T') || (refTs.includes('-') && refTs.includes(':')))) {
         const d = new Date(parseSqlUtcDate(refTs));
         if (!isNaN(d.getTime())) {
@@ -2073,9 +2086,9 @@ export const ApiService = {
           id_conductor: matchedRow.id_conductor || null,
           id_usuario: matchedRow.id_usuario || 1,
           fecha: resolveLocalFechaForAcceso(matchedRow),
-          hora_entrada: matchedRow.hora_entrada && matchedRow.hora_entrada !== 'null' ? matchedRow.hora_entrada : (matchedRow.created_at || null),
-          hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
-            ? (matchedRow.hora_salida && matchedRow.hora_salida !== 'null' ? matchedRow.hora_salida : (matchedRow.updated_at || matchedRow.created_at || null))
+          hora_entrada: resolveIsoTimestamp(matchedRow.hora_entrada, matchedRow.raw_hora_entrada, matchedRow.created_at),
+          hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida || matchedRow.raw_hora_salida)
+            ? resolveIsoTimestamp(matchedRow.hora_salida, matchedRow.raw_hora_salida, matchedRow.updated_at || matchedRow.created_at)
             : null,
           ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
           estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (matchedRow.hora_salida ? 'salida' : 'permitido'),
@@ -2118,9 +2131,9 @@ export const ApiService = {
               id_conductor: matchedRow.id_conductor || null,
               id_usuario: matchedRow.id_usuario || 1,
               fecha: resolveLocalFechaForAcceso(matchedRow),
-              hora_entrada: matchedRow.hora_entrada && matchedRow.hora_entrada !== 'null' ? matchedRow.hora_entrada : (matchedRow.created_at || null),
-              hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida)
-                ? (matchedRow.hora_salida && matchedRow.hora_salida !== 'null' ? matchedRow.hora_salida : (matchedRow.updated_at || matchedRow.created_at || null))
+              hora_entrada: resolveIsoTimestamp(matchedRow.hora_entrada, matchedRow.raw_hora_entrada, matchedRow.created_at),
+              hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida || matchedRow.raw_hora_salida)
+                ? resolveIsoTimestamp(matchedRow.hora_salida, matchedRow.raw_hora_salida, matchedRow.updated_at || matchedRow.created_at)
                 : null,
               ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
               estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (matchedRow.hora_salida ? 'salida' : 'permitido'),
@@ -2661,7 +2674,7 @@ export const ApiService = {
           adjustedFechaFin = new Date(new Date(s.fecha_inicio).getTime() + 24 * 60 * 60 * 1000).toISOString();
         } else if (finalNivel === 3 && !adjustedFechaFin && s.fecha_inicio) {
           adjustedFechaFin = new Date(new Date(s.fecha_inicio).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-        } else if ((finalNivel === 1 || finalNivel === 4) && adjustedFechaFin) {
+        } else if (finalNivel === 4 && adjustedFechaFin) {
           adjustedFechaFin = null;
         }
 

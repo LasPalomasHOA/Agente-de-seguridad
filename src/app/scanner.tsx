@@ -113,6 +113,11 @@ const formatFecha = (dateStr?: string | null): string => {
     }
   }
 
+  // Si es únicamente una hora (ej. "05:09 p. m." o "10:09:00") sin separadores de fecha, no devolverla como fecha
+  if (!clean.includes('-') && !clean.includes('/')) {
+    return '';
+  }
+
   const datePart = clean.includes('T') ? clean.split('T')[0] : (clean.includes(' ') ? clean.split(' ')[0] : clean);
   const parts = datePart.split('-');
   if (parts.length === 3) {
@@ -246,14 +251,18 @@ export default function ScannerScreen() {
     if (!ultimoAcceso) return false;
     const todayStr = getLocalDateStr(new Date());
 
-    // Priorizar el timestamp real del evento (salida o entrada) convertido a zona horaria local
-    const refTs =
-      ultimoAcceso.hora_salida ||
-      ultimoAcceso.hora_entrada ||
-      ultimoAcceso.updated_at ||
-      ultimoAcceso.created_at;
+    // Priorizar el primer timestamp completo disponible (salida o entrada) convertido a zona horaria local
+    const candidates = [
+      ultimoAcceso.hora_salida,
+      ultimoAcceso.hora_entrada,
+      ultimoAcceso.updated_at,
+      ultimoAcceso.created_at,
+    ];
+    const refTs = candidates.find(
+      (c) => typeof c === 'string' && (c.includes('T') || (c.includes('-') && c.includes(':')))
+    );
 
-    if (refTs && typeof refTs === 'string' && (refTs.includes('T') || (refTs.includes('-') && refTs.includes(':')))) {
+    if (refTs) {
       const eventLocalDate = getLocalDateStr(new Date(parseSqlUtcDate(refTs)));
       return eventLocalDate === todayStr;
     }
@@ -306,7 +315,7 @@ export default function ScannerScreen() {
     }
 
     // 2. Fallback de tiempo para horas simples HH:mm
-    const timeVal = formatHora(ultimoAcceso.hora_entrada);
+    const timeVal = formatHora(ultimoAcceso.hora_entrada, ultimoAcceso.created_at);
     if (!timeVal) return '';
 
     try {
@@ -344,10 +353,14 @@ export default function ScannerScreen() {
 
       if (res && res.success) {
         const salidaFmt = formatHora(res.horaSalida) || res.horaSalida.substring(0, 5);
-        const horaEntradaBase = formatHora(ultimoAcceso?.hora_entrada);
+        const horaEntradaBase = formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at);
+        const fechaEntradaStr =
+          formatFecha(ultimoAcceso?.hora_entrada) ||
+          formatFecha(ultimoAcceso?.fecha) ||
+          formatFecha(ultimoAcceso?.created_at);
         const entradaFmt = isAccesoToday
           ? (horaEntradaBase || undefined)
-          : (ultimoAcceso?.fecha ? `${formatFecha(ultimoAcceso.fecha)} ${horaEntradaBase || ''}`.trim() : (horaEntradaBase || undefined));
+          : (fechaEntradaStr ? `${fechaEntradaStr} ${horaEntradaBase || ''}`.trim() : (horaEntradaBase || undefined));
 
         setExitSuccessModal({
           visible: true,
@@ -390,7 +403,7 @@ export default function ScannerScreen() {
 
       if (res && res.success && res.acceso) {
         setUltimoAcceso(res.acceso);
-        const horaFmt = formatHora(res.acceso.hora_entrada) || '';
+        const horaFmt = formatHora(res.acceso.hora_entrada, res.acceso.created_at) || '';
         alert(`¡Entrada autorizada y registrada a las ${horaFmt} hrs!`);
       }
     } catch (e: any) {
@@ -694,15 +707,21 @@ export default function ScannerScreen() {
     const estatusCorbatin = (selectedCorbatin?.estatus || '').toLowerCase();
     const ahoraMs = nowTick;
 
-    // Normaliza la fecha de inicio al estándar reglamentario (12:00 AM del día siguiente si tenía hora distinta a 00:00:00)
+    // Normaliza la fecha de inicio al estándar reglamentario (7:00 AM del día siguiente en hora local)
     const normalizarInicioSancionMs = (rawInicio?: string | null): number => {
       const ms = parseSqlUtcDate(rawInicio);
       const d = new Date(ms);
       if (isNaN(d.getTime())) return ms;
-      if (d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0) {
-        return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+      // Si ya viene programada a las 07:00:00 AM (calculada por el backend para el día siguiente a las 7:00 AM), respetarla tal cual sin sumar otro día
+      if (d.getHours() === 7 && d.getMinutes() === 0 && d.getSeconds() === 0) {
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 7, 0, 0, 0).getTime();
       }
-      return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
+      // Si venía normalizada al estándar anterior de 00:00:00 (12:00 AM del día siguiente), ajustar a las 7:00 AM de ese mismo día
+      if (d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0) {
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 7, 0, 0, 0).getTime();
+      }
+      // Si tenía la hora exacta del momento de aprobación, programar para el día siguiente a las 7:00 AM hora local
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 7, 0, 0, 0).getTime();
     };
 
     const calcularFinMs = (s: SancionDbRow, inicioMs: number, nivelS: number): number | null => {
@@ -719,7 +738,7 @@ export default function ScannerScreen() {
       return defHoras > 0 ? inicioMs + defHoras * 60 * 60 * 1000 : null;
     };
 
-    // Filtrar sanciones activas que no hayan expirado según inicio 12:00 AM + horas editables de la regla
+    // Filtrar sanciones activas que no hayan expirado según inicio 7:00 AM + horas editables de la regla
     const sancionesEnVigor = (sancionesActivas || []).filter((s) => {
       const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
       const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
@@ -794,10 +813,10 @@ export default function ScannerScreen() {
       : (horasSuspension === 0 && !sancion.fecha_fin);
     const requiresAdmin = Boolean(reglaConfig?.requiere_administrador || horasSuspension === -1 || nivel >= 4);
 
-    // Calcular fecha_fin efectiva priorizando siempre las horas editables de la regla desde las 12:00 AM de inicio
+    // Calcular fecha_fin efectiva priorizando siempre las horas editables de la regla desde las 7:00 AM de inicio
     const fechaFinMs = calcularFinMs(sancion, fechaInicioMs, nivel);
 
-    // ─── CASO 0: Sanción programada que aún no llega a su fecha de inicio (12:00 AM del día siguiente) ───
+    // ─── CASO 0: Sanción programada que aún no llega a su fecha de inicio (7:00 AM del día siguiente) ───
     if (ahoraMs < fechaInicioMs) {
       const inicioDate = new Date(fechaInicioMs);
       const inicioLabel = inicioDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -805,14 +824,14 @@ export default function ScannerScreen() {
         isBlocked: false,
         isWarning: true,
         level: nivel,
-        levelTitle: `${nivel}ª Falta Programada (Inicia 12:00 AM)`,
+        levelTitle: `${nivel}ª Falta Programada (Inicia 7:00 AM)`,
         levelBadge: `INICIA ${inicioLabel}`,
-        levelName: `${nivel}ª Falta - Entra en vigor el ${inicioLabel} a las 12:00 AM`,
-        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || `Sanción programada para iniciar el ${inicioLabel} a las 12:00 AM.`,
-        timeRemainingText: `Inicia ${inicioLabel} 12:00 AM`,
+        levelName: `${nivel}ª Falta - Entra en vigor el ${inicioLabel} a las 7:00 AM`,
+        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || `Sanción programada para iniciar el ${inicioLabel} a las 7:00 AM.`,
+        timeRemainingText: `Inicia ${inicioLabel} 7:00 AM`,
         fechaFinText: fechaFinMs
           ? `Hasta ${new Date(fechaFinMs).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${new Date(fechaFinMs).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`
-          : 'Acceso Permitido Hasta Medianoche',
+          : 'Acceso Permitido Hasta 7:00 AM',
         requiresAdmin: false,
         badgeBg: '#D97706',
       };
@@ -1291,7 +1310,9 @@ export default function ScannerScreen() {
                   <Ionicons name="warning" size={20} color="#D97706" />
                 </View>
                 <View style={{ flex: 1, gap: 2 }}>
-                  <ThemedText style={styles.warningLevel1Title}>1ª Falta: Llamado de Atención</ThemedText>
+                  <ThemedText style={styles.warningLevel1Title}>
+                    {evaluacionSancion?.levelTitle || '1ª Falta: Llamado de Atención'}
+                  </ThemedText>
                   <ThemedText style={styles.warningLevel1Desc}>
                     {evaluacionSancion?.motivo || 'Primer llamado de atención registrado en el sistema. Se autoriza el acceso vehicular.'}
                   </ThemedText>
@@ -1406,11 +1427,11 @@ export default function ScannerScreen() {
                         {isVehicleInside
                           ? (isAccesoToday
                             ? `🟢 Acceso activo registrado hoy a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`
-                            : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.hora_entrada || ultimoAcceso?.fecha || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`)
+                            : `🟢 Acceso activo desde el ${formatFecha(ultimoAcceso?.hora_entrada) || formatFecha(ultimoAcceso?.fecha) || formatFecha(ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_entrada, ultimoAcceso?.created_at) || ''} hrs.`)
                           : ultimoAcceso?.hora_salida
                             ? (isAccesoToday
                               ? `⚪ Última salida registrada hoy a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`
-                              : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.hora_salida || ultimoAcceso?.fecha || ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`)
+                              : `⚪ Última salida registrada el ${formatFecha(ultimoAcceso?.hora_salida) || formatFecha(ultimoAcceso?.fecha) || formatFecha(ultimoAcceso?.updated_at) || formatFecha(ultimoAcceso?.created_at)} a las ${formatHora(ultimoAcceso?.hora_salida, ultimoAcceso?.updated_at || ultimoAcceso?.created_at)} hrs.`)
                             : 'Sin registro de estancia activo.'}
                       </ThemedText>
                       <ThemedText style={styles.historyRowSubtitle}>
