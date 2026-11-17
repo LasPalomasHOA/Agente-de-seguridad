@@ -172,19 +172,7 @@ export async function getVehiculoFoto(idVehiculo: number | string): Promise<stri
   const cached = ImageCacheStore.getVehiclePhoto(idVehiculo);
   if (cached) return cached;
 
-  // 2. Consultar vía Express API
-  try {
-    const v = await fetchJson(`/vehiculos/${idVehiculo}`);
-    const photo = v?.foto_url || v?.foto;
-    if (photo) {
-      ImageCacheStore.setVehiclePhoto(idVehiculo, photo);
-      return photo;
-    }
-  } catch {
-    // Fallback a Supabase si aplica
-  }
-
-  // 3. Fallback directo a Supabase
+  // 2. Consultar primero vía Supabase PostgREST solo la columna foto_url (evita despertar Shared Pooler)
   if (isSupabaseConfigured()) {
     try {
       const { data, error } = await (supabase as any)
@@ -201,6 +189,16 @@ export async function getVehiculoFoto(idVehiculo: number | string): Promise<stri
       console.warn('[ApiService] Error al obtener foto de vehículo:', err);
     }
   }
+
+  // 3. Fallback vía Express API
+  try {
+    const v = await fetchJson(`/vehiculos/${idVehiculo}`);
+    const photo = v?.foto_url || v?.foto;
+    if (photo) {
+      ImageCacheStore.setVehiclePhoto(idVehiculo, photo);
+      return photo;
+    }
+  } catch { }
 
   return null;
 }
@@ -281,14 +279,17 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
 
     const data = await res.json();
 
-    // Guardar ETag recibido para futuras peticiones condicionales
+    // Guardar ETag recibido para futuras peticiones condicionales (evitar saturar localStorage con payloads grandes)
     if (isGet) {
       const etag = res.headers.get('etag') || res.headers.get('ETag');
       if (etag) {
         const entry = { etag, data };
         httpEtagCache.set(url, entry);
         try {
-          safeStorage.setItem(`hoa_etag_${url}`, JSON.stringify(entry));
+          const serialized = JSON.stringify(entry);
+          if (serialized.length <= 100_000) {
+            safeStorage.setItem(`hoa_etag_${url}`, serialized);
+          }
         } catch { }
       }
     }
@@ -1274,7 +1275,7 @@ export const ApiService = {
           : (hasVehicle
             ? this.getReportesCount({ idVehiculo: Number(vehiculoRow.id_vehiculo) })
             : Promise.resolve(0)),
-        hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin, true) : Promise.resolve(null),
+        hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin, false) : Promise.resolve(null),
       ]);
 
       const validActiveStatuses = new Set([
@@ -1376,6 +1377,19 @@ export const ApiService = {
       'catalogo_infracciones',
       TTL_STATIC_CATALOGS,
       async () => {
+        if (isSupabaseConfigured()) {
+          try {
+            const { data, error } = await supabase
+              .from('catalogo_infracciones')
+              .select(PROJECTIONS.CATALOGO_INFRACCIONES)
+              .eq('activo', true)
+              .limit(100);
+            if (!error && Array.isArray(data) && data.length > 0) {
+              return data as CatalogoInfraccionRow[];
+            }
+          } catch { }
+        }
+
         try {
           const data = await fetchJson('/infracciones');
           if (Array.isArray(data)) {
@@ -1389,18 +1403,7 @@ export const ApiService = {
               activo: inf.activo ?? true,
             }));
           }
-        } catch {
-          if (isSupabaseConfigured()) {
-            const { data } = await supabase
-              .from('catalogo_infracciones')
-              .select(PROJECTIONS.CATALOGO_INFRACCIONES)
-              .eq('activo', true)
-              .limit(100);
-            if (data && Array.isArray(data)) {
-              return data as CatalogoInfraccionRow[];
-            }
-          }
-        }
+        } catch { }
         return [];
       },
       forceRefresh
@@ -1499,70 +1502,52 @@ export const ApiService = {
    * Obtiene las reglas de reincidencia con caché persistente (TTL 30 min)
    */
   async getReglasReincidencia(forceRefresh = false): Promise<ReglaReincidenciaRow[]> {
+    const mapReglaRow = (r: any): ReglaReincidenciaRow => {
+      let h = r.horas_suspension;
+      if (h === undefined || h === null) {
+        const match = (r.mensaje_alerta || '').match(/\[HORAS:(-?\d+)\]/);
+        if (match) h = parseInt(match[1], 10);
+        else {
+          if (r.numero_falta === 1) h = 0;
+          else if (r.numero_falta === 2) h = 24;
+          else if (r.numero_falta === 3) h = 168;
+          else h = -1;
+        }
+      }
+      return {
+        id_regla: r.id_regla,
+        numero_falta: r.numero_falta,
+        permite_acceso: r.permite_acceso ?? true,
+        requiere_administrador: r.requiere_administrador ?? false,
+        mensaje_alerta: (r.mensaje_alerta || '').replace(/\[HORAS:(-?\d+)\]\s*/g, ''),
+        horas_suspension: Number(h),
+        activo: r.activo ?? true,
+      };
+    };
+
     return apiCache.getOrFetch(
       'reglas_reincidencia',
       TTL_STATIC_CATALOGS,
       async () => {
-        try {
-          const data = await fetchJson('/reglas');
-          if (Array.isArray(data)) {
-            return data.map((r: any) => {
-              let h = r.horas_suspension;
-              if (h === undefined || h === null) {
-                const match = (r.mensaje_alerta || '').match(/\[HORAS:(-?\d+)\]/);
-                if (match) h = parseInt(match[1], 10);
-                else {
-                  if (r.numero_falta === 1) h = 0;
-                  else if (r.numero_falta === 2) h = 24;
-                  else if (r.numero_falta === 3) h = 168;
-                  else h = -1;
-                }
-              }
-              return {
-                id_regla: r.id_regla,
-                numero_falta: r.numero_falta,
-                permite_acceso: r.permite_acceso ?? true,
-                requiere_administrador: r.requiere_administrador ?? false,
-                mensaje_alerta: (r.mensaje_alerta || '').replace(/\[HORAS:(-?\d+)\]\s*/g, ''),
-                horas_suspension: Number(h),
-                activo: r.activo ?? true,
-              };
-            });
-          }
-
-        } catch {
-          if (isSupabaseConfigured()) {
-            const { data } = await supabase
+        if (isSupabaseConfigured()) {
+          try {
+            const { data, error } = await supabase
               .from('reglas_reincidencia' as any)
               .select(PROJECTIONS.REGLAS_REINCIDENCIA)
               .eq('activo', true)
               .limit(20);
-            if (data && Array.isArray(data)) {
-              return (data as any[]).map((r: any) => {
-                let h = r.horas_suspension;
-                if (h === undefined || h === null) {
-                  const match = (r.mensaje_alerta || '').match(/\[HORAS:(-?\d+)\]/);
-                  if (match) h = parseInt(match[1], 10);
-                  else {
-                    if (r.numero_falta === 1) h = 0;
-                    else if (r.numero_falta === 2) h = 24;
-                    else if (r.numero_falta === 3) h = 168;
-                    else h = -1;
-                  }
-                }
-                return {
-                  id_regla: r.id_regla,
-                  numero_falta: r.numero_falta,
-                  permite_acceso: r.permite_acceso ?? true,
-                  requiere_administrador: r.requiere_administrador ?? false,
-                  mensaje_alerta: (r.mensaje_alerta || '').replace(/\[HORAS:(-?\d+)\]\s*/g, ''),
-                  horas_suspension: Number(h),
-                  activo: r.activo ?? true,
-                };
-              });
+            if (!error && Array.isArray(data) && data.length > 0) {
+              return data.map(mapReglaRow);
             }
-          }
+          } catch { }
         }
+
+        try {
+          const data = await fetchJson('/reglas');
+          if (Array.isArray(data)) {
+            return data.map(mapReglaRow);
+          }
+        } catch { }
         return [];
       },
       forceRefresh
@@ -1792,6 +1777,26 @@ export const ApiService = {
     const cached = apiCache.get<number>(cacheKey, TTL_REPORTES);
     if (cached !== null && cached !== undefined) return cached;
 
+    // 1. Priorizar HEAD con conteo exacto en headers de Supabase (0 bytes de body, evita Shared Pooler)
+    if (isSupabaseConfigured()) {
+      try {
+        let query = (supabase as any)
+          .from('reportes_infracciones')
+          .select('id_reporte', { count: 'exact', head: true });
+        if (idVehiculo) {
+          query = query.eq('id_vehiculo', idVehiculo);
+        } else if (idUsuario) {
+          query = query.eq('id_usuario', idUsuario);
+        }
+        const { count, error } = await query;
+        if (!error && typeof count === 'number') {
+          apiCache.set(cacheKey, count);
+          return count;
+        }
+      } catch { }
+    }
+
+    // 2. Fallback a Express Backend
     try {
       const queryParams: string[] = ['count=1', 'limit=1'];
       if (idVehiculo) queryParams.push(`id_vehiculo=${idVehiculo}`);
@@ -1816,19 +1821,6 @@ export const ApiService = {
         return count;
       }
     } catch { }
-
-    // Fallback Egress = 0 bytes (solicitud HEAD con conteo exacto en headers de Supabase)
-    if (isSupabaseConfigured()) {
-      try {
-        const count = await getCountOptimized(
-          'reportes_infracciones',
-          idVehiculo ? 'id_vehiculo' : idUsuario ? 'id_usuario' : undefined,
-          idVehiculo || idUsuario
-        );
-        apiCache.set(cacheKey, count);
-        return count;
-      } catch { }
-    }
 
     return 0;
   },
@@ -1976,6 +1968,38 @@ export const ApiService = {
       cacheKey,
       TTL_REPORTES,
       async () => {
+        // 1. Priorizar consulta directa por PostgREST con proyección explícita (evita Shared Pooler)
+        if (isSupabaseConfigured()) {
+          try {
+            let query = (supabase as any)
+              .from('reportes_infracciones')
+              .select(
+                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, corbatines(numero), catalogo_infracciones(codigo), evidencias(id_evidencia, archivo, descripcion, fecha_captura)'
+              )
+              .order('id_reporte', { ascending: false })
+              .limit(queryLimit);
+
+            if (idUsuario) query = query.eq('id_usuario', idUsuario);
+            if (idVehiculo) query = query.eq('id_vehiculo', idVehiculo);
+
+            const { data, error } = await query;
+            if (!error && Array.isArray(data)) {
+              // Cachear en EvidenciaCacheStore cada URL de evidencia recuperada (0 bytes Egress en futuras consultas)
+              data.forEach((r: any) => {
+                if (r.evidencias && Array.isArray(r.evidencias)) {
+                  r.evidencias.forEach((ev: any) => {
+                    if (ev.id_evidencia && ev.archivo) {
+                      EvidenciaCacheStore.setFoto(ev.id_evidencia, ev.archivo);
+                    }
+                  });
+                }
+              });
+              return data;
+            }
+          } catch { }
+        }
+
+        // 2. Fallback a Express Backend
         try {
           const queryParams: string[] = [`limit=${queryLimit}`];
           if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
@@ -1989,35 +2013,7 @@ export const ApiService = {
             }
             return data;
           }
-        } catch {
-          if (isSupabaseConfigured()) {
-            let query = (supabase as any)
-              .from('reportes_infracciones')
-              .select(
-                'id_reporte, id_vehiculo, id_corbatin, id_infraccion, id_usuario, fecha_hora, estatus_revision, ubicacion_texto, descripcion_hechos, corbatines(numero), catalogo_infracciones(codigo), evidencias(id_evidencia, archivo, descripcion, fecha_captura)'
-              )
-              .order('id_reporte', { ascending: false })
-              .limit(queryLimit);
-
-            if (idUsuario) query = query.eq('id_usuario', idUsuario);
-            if (idVehiculo) query = query.eq('id_vehiculo', idVehiculo);
-
-            const { data } = await query;
-            if (data && Array.isArray(data)) {
-              // Cachear en EvidenciaCacheStore cada URL de evidencia recuperada (0 bytes Egress en futuras consultas)
-              data.forEach((r: any) => {
-                if (r.evidencias && Array.isArray(r.evidencias)) {
-                  r.evidencias.forEach((ev: any) => {
-                    if (ev.id_evidencia && ev.archivo) {
-                      EvidenciaCacheStore.setFoto(ev.id_evidencia, ev.archivo);
-                    }
-                  });
-                }
-              });
-              return data;
-            }
-          }
-        }
+        } catch { }
         return [];
       },
       forceRefresh
@@ -2091,40 +2087,27 @@ export const ApiService = {
       }
     } catch { }
 
-    // 2. Consultar servidor Express
-    try {
-      const queryParam = vId ? `id_vehiculo=${vId}` : `id_corbatin=${cId}`;
-      const res = await fetchJson(`/bitacora?${queryParam}&limit=1`);
-      const list = Array.isArray(res) ? res : res?.accesos || (res?.id_acceso ? [res] : []);
-      // FILTRADO ESTRICTO: Solo aceptar el registro si realmente pertenece a idVehiculo o idCorbatin
-      const matchedRow = list.find((r: any) => (vId && Number(r.id_vehiculo) === vId) || (cId && Number(r.id_corbatin) === cId));
-      if (matchedRow) {
-        const mapped: BitacoraAccesoRow = {
-          id_acceso: matchedRow.id_acceso,
-          id_caseta: matchedRow.id_caseta || 1,
-          id_vehiculo: matchedRow.id_vehiculo,
-          id_corbatin: matchedRow.id_corbatin || null,
-          id_conductor: matchedRow.id_conductor || null,
-          id_usuario: matchedRow.id_usuario || 1,
-          fecha: resolveLocalFechaForAcceso(matchedRow),
-          hora_entrada: resolveIsoTimestamp(matchedRow.hora_entrada, matchedRow.raw_hora_entrada, matchedRow.created_at),
-          hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida || matchedRow.raw_hora_salida)
-            ? resolveIsoTimestamp(matchedRow.hora_salida, matchedRow.raw_hora_salida, matchedRow.updated_at || matchedRow.created_at)
-            : null,
-          ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
-          estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (matchedRow.hora_salida ? 'salida' : 'permitido'),
-          motivo_rechazo: matchedRow.motivo_rechazo || null,
-          observaciones: matchedRow.observaciones || null,
-          created_at: matchedRow.created_at || new Date().toISOString(),
-          updated_at: matchedRow.updated_at || new Date().toISOString(),
-        };
+    const mapBitacoraRow = (matchedRow: any): BitacoraAccesoRow => ({
+      id_acceso: matchedRow.id_acceso,
+      id_caseta: matchedRow.id_caseta || 1,
+      id_vehiculo: matchedRow.id_vehiculo,
+      id_corbatin: matchedRow.id_corbatin || null,
+      id_conductor: matchedRow.id_conductor || null,
+      id_usuario: matchedRow.id_usuario || 1,
+      fecha: resolveLocalFechaForAcceso(matchedRow),
+      hora_entrada: resolveIsoTimestamp(matchedRow.hora_entrada, matchedRow.raw_hora_entrada, matchedRow.created_at),
+      hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida || matchedRow.raw_hora_salida)
+        ? resolveIsoTimestamp(matchedRow.hora_salida, matchedRow.raw_hora_salida, matchedRow.updated_at || matchedRow.created_at)
+        : null,
+      ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
+      estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (matchedRow.hora_salida ? 'salida' : 'permitido'),
+      motivo_rechazo: matchedRow.motivo_rechazo || null,
+      observaciones: matchedRow.observaciones || null,
+      created_at: matchedRow.created_at || new Date().toISOString(),
+      updated_at: matchedRow.updated_at || new Date().toISOString(),
+    });
 
-        apiCache.set(cacheKey, mapped);
-        return mapped;
-      }
-    } catch { }
-
-    // 3. Supabase Fallback
+    // 2. Priorizar consulta ligera vía Supabase PostgREST (evita Shared Pooler)
     if (isSupabaseConfigured()) {
       try {
         let query = (supabase as any)
@@ -2144,32 +2127,27 @@ export const ApiService = {
         if (!error && data && data.length > 0) {
           const matchedRow = data.find((r: any) => (vId && Number(r.id_vehiculo) === vId) || (cId && Number(r.id_corbatin) === cId)) || data[0];
           if (matchedRow) {
-            const mapped: BitacoraAccesoRow = {
-              id_acceso: matchedRow.id_acceso,
-              id_caseta: matchedRow.id_caseta || 1,
-              id_vehiculo: matchedRow.id_vehiculo,
-              id_corbatin: matchedRow.id_corbatin || null,
-              id_conductor: matchedRow.id_conductor || null,
-              id_usuario: matchedRow.id_usuario || 1,
-              fecha: resolveLocalFechaForAcceso(matchedRow),
-              hora_entrada: resolveIsoTimestamp(matchedRow.hora_entrada, matchedRow.raw_hora_entrada, matchedRow.created_at),
-              hora_salida: (matchedRow.estatus_acceso?.toLowerCase() === 'salida' || matchedRow.hora_salida || matchedRow.raw_hora_salida)
-                ? resolveIsoTimestamp(matchedRow.hora_salida, matchedRow.raw_hora_salida, matchedRow.updated_at || matchedRow.created_at)
-                : null,
-              ubicacion_trabajo: matchedRow.ubicacion_trabajo || null,
-              estatus_acceso: (matchedRow.estatus_acceso?.toLowerCase() as any) || (matchedRow.hora_salida ? 'salida' : 'permitido'),
-              motivo_rechazo: matchedRow.motivo_rechazo || null,
-              observaciones: matchedRow.observaciones || null,
-              created_at: matchedRow.created_at || new Date().toISOString(),
-              updated_at: matchedRow.updated_at || new Date().toISOString(),
-            };
-
+            const mapped = mapBitacoraRow(matchedRow);
             apiCache.set(cacheKey, mapped);
             return mapped;
           }
         }
       } catch { }
     }
+
+    // 3. Fallback a servidor Express
+    try {
+      const queryParam = vId ? `id_vehiculo=${vId}` : `id_corbatin=${cId}`;
+      const res = await fetchJson(`/bitacora?${queryParam}&limit=1`);
+      const list = Array.isArray(res) ? res : res?.accesos || (res?.id_acceso ? [res] : []);
+      // FILTRADO ESTRICTO: Solo aceptar el registro si realmente pertenece a idVehiculo o idCorbatin
+      const matchedRow = list.find((r: any) => (vId && Number(r.id_vehiculo) === vId) || (cId && Number(r.id_corbatin) === cId));
+      if (matchedRow) {
+        const mapped = mapBitacoraRow(matchedRow);
+        apiCache.set(cacheKey, mapped);
+        return mapped;
+      }
+    } catch { }
 
     // 4. Si el backend no devolvió filas pero hay registro local
     if (localAcceso && ((vId && Number(localAcceso.id_vehiculo) === vId) || (cId && Number(localAcceso.id_corbatin) === cId))) {
@@ -2539,23 +2517,26 @@ export const ApiService = {
    */
   async getCorbatines(): Promise<CorbatinRow[]> {
     return apiCache.getOrFetch('corbatines_list', TTL_VEHICLES_CORBATINES, async () => {
+      if (isSupabaseConfigured()) {
+        try {
+          const { data, error } = await supabase
+            .from('corbatines')
+            .select(PROJECTIONS.CORBATINES_LIGHT)
+            .limit(50);
+          if (!error && Array.isArray(data) && data.length > 0) {
+            saveCorbatinesListToOfflineCatalog(data).catch(() => { });
+            return data as CorbatinRow[];
+          }
+        } catch { }
+      }
+
       try {
         const data = await fetchJson('/corbatines?limit=50');
         if (Array.isArray(data)) {
           saveCorbatinesListToOfflineCatalog(data).catch(() => { });
           return data;
         }
-      } catch {
-        if (isSupabaseConfigured()) {
-          const { data } = await supabase
-            .from('corbatines')
-            .select(PROJECTIONS.CORBATINES_LIGHT)
-            .limit(50);
-          if (data && Array.isArray(data)) {
-            return data as CorbatinRow[];
-          }
-        }
-      }
+      } catch { }
       return [];
     });
   },

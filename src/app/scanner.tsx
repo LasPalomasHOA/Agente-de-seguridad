@@ -228,7 +228,7 @@ export default function ScannerScreen() {
   const [reglasReincidencia, setReglasReincidencia] = useState<ReglaReincidenciaRow[]>([]);
   useEffect(() => {
     let active = true;
-    SupabaseService.getReglasReincidencia(true)
+    SupabaseService.getReglasReincidencia(false)
       .then((res) => {
         if (active && Array.isArray(res) && res.length > 0) {
           setReglasReincidencia(res);
@@ -434,7 +434,7 @@ export default function ScannerScreen() {
     try {
       const [res, liveReglas] = await Promise.all([
         SupabaseService.buscarCorbatin(cleanCode),
-        online ? SupabaseService.getReglasReincidencia(true).catch(() => null) : Promise.resolve(null),
+        online ? SupabaseService.getReglasReincidencia(false).catch(() => null) : Promise.resolve(null),
       ]);
       if (Array.isArray(liveReglas) && liveReglas.length > 0) {
         setReglasReincidencia(liveReglas);
