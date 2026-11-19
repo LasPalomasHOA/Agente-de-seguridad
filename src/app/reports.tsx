@@ -22,6 +22,13 @@ import { ReporteInfraccion } from '../types/reporte';
 import { SupabaseService } from '../services/supabaseService';
 import { SocialSyncPill } from '@/components/social-sync-pill';
 import { useSocialRefresh } from '../hooks/use-social-refresh';
+import { PhotoLightboxModal } from '../components/PhotoLightboxModal';
+import {
+  filterOfficerReports,
+  formatCorbatinDisplay,
+  getOfficerReportCounts,
+  loadReportEvidenciaPhotos,
+} from '../utils/reportHelpers';
 
 export default function ReportsScreen() {
   const router = useRouter();
@@ -59,51 +66,29 @@ export default function ReportsScreen() {
   // Carga diferida (lazy loading) al abrir el expediente
   const handleOpenReportModal = async (rep: ReporteInfraccion) => {
     setSelectedReport(rep);
-
-    if (rep.evidencias && rep.evidencias.length > 0) {
-      const faltanFotos = rep.evidencias.some((ev) => !ev.fotoUrl);
-      if (faltanFotos) {
-        setLoadingPhotos(true);
-        try {
-          const evidenciasActualizadas = await Promise.all(
-            rep.evidencias.map(async (ev) => {
-              if (ev.fotoUrl) return ev;
-              const fotoBase64 = await SupabaseService.getEvidenciaFoto(ev.id);
-              return {
-                ...ev,
-                fotoUrl: fotoBase64 || '',
-              };
-            })
-          );
-          setSelectedReport((prev) => (prev ? { ...prev, evidencias: evidenciasActualizadas } : null));
-        } finally {
-          setLoadingPhotos(false);
-        }
+    if (rep.evidencias?.some((ev) => !ev.fotoUrl)) {
+      setLoadingPhotos(true);
+      try {
+        const updated = await loadReportEvidenciaPhotos(rep);
+        setSelectedReport((prev) => (prev ? { ...prev, evidencias: updated.evidencias } : null));
+      } finally {
+        setLoadingPhotos(false);
       }
     }
   };
 
   const misReportes = useMemo(
-    () => reportes.filter((r) => r.agenteId === agenteActual.id),
+    () => filterOfficerReports(reportes, agenteActual.id),
     [reportes, agenteActual.id]
   );
 
   // Status counts
-  const totalCount = useMemo(() => misReportes.length, [misReportes]);
-  const pendientesCount = useMemo(
-    () => misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length,
-    [misReportes]
-  );
-  const aprobadosCount = useMemo(
-    () => misReportes.filter((r) => r.estado === 'aprobado').length,
+  const { total: totalCount, pendientes: pendientesCount, aprobados: aprobadosCount, borradores: borradoresCount } = useMemo(
+    () => getOfficerReportCounts(misReportes),
     [misReportes]
   );
   const rechazadosCount = useMemo(
     () => misReportes.filter((r) => r.estado === 'rechazado').length,
-    [misReportes]
-  );
-  const borradoresCount = useMemo(
-    () => misReportes.filter((r) => r.estado === 'borrador').length,
     [misReportes]
   );
 
@@ -509,13 +494,9 @@ export default function ReportsScreen() {
                   </View>
                   <View style={{ flex: 1, gap: 1 }}>
                     <ThemedText style={styles.targetCorbatinTitle}>
-                      {(() => {
-                        if (!rep.corbatinNumero || rep.corbatinNumero === 'S/C') return 'Sin Corbatín';
-                        const digits = rep.corbatinNumero.replace(/\D/g, '');
-                        if (!digits) return `Corbatín #${rep.corbatinNumero}`;
-                        const cleanNum = digits.startsWith('2026') && digits.length > 4 ? digits.slice(4) : digits;
-                        return `Corbatín #${cleanNum ? parseInt(cleanNum, 10) : rep.corbatinNumero}`;
-                      })()}
+                      {rep.corbatinNumero && rep.corbatinNumero !== 'S/C'
+                        ? `Corbatín #${formatCorbatinDisplay(rep.corbatinNumero).replace(/^C-/, '')}`
+                        : 'Sin Corbatín'}
                     </ThemedText>
                     <ThemedText style={styles.targetVehicleSub} numberOfLines={1}>
                       📍 {rep.lugar || 'Zona Residencial'}
@@ -889,48 +870,13 @@ export default function ReportsScreen() {
         </Modal>
       )}
 
-      {/* ─── LIGHTBOX STANDALONE (CUANDO SE TOCA MINIATURA DIRECTO EN LA TARJETA) ─── */}
-      {zoomPhoto && !selectedReport && (
-        <Modal visible={true} transparent animationType="fade" onRequestClose={() => setZoomPhoto(null)}>
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalCard}>
-              <View style={styles.modalHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                  <View style={styles.lightboxIconBadge}>
-                    <Ionicons name="camera" size={18} color="#0D6E5F" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <ThemedText style={styles.modalTitle}>Evidencia Fotográfica</ThemedText>
-                    <ThemedText style={styles.modalSubTitle}>Inspección visual de campo</ThemedText>
-                  </View>
-                </View>
-                <Pressable onPress={() => setZoomPhoto(null)} style={styles.modalCloseIconBtn}>
-                  <Ionicons name="close" size={20} color="#475569" />
-                </Pressable>
-              </View>
-
-              <View style={styles.lightboxStageBox}>
-                <Image
-                  source={{ uri: zoomPhoto }}
-                  style={styles.lightboxStageImage}
-                  contentFit="contain"
-                  cachePolicy="memory-disk"
-                />
-                <View style={styles.lightboxStagePill}>
-                  <Ionicons name="shield-checkmark" size={12} color="#10B981" />
-                  <ThemedText style={styles.lightboxStagePillText}>Evidencia Oficial HOA</ThemedText>
-                </View>
-              </View>
-
-              <View style={styles.modalFooterActions}>
-                <Pressable onPress={() => setZoomPhoto(null)} style={styles.modalCloseButton}>
-                  <ThemedText style={styles.modalCloseButtonText}>Cerrar Vista</ThemedText>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </Modal>
-      )}
+      <PhotoLightboxModal
+        visible={!!zoomPhoto && !selectedReport}
+        uri={zoomPhoto}
+        title="Evidencia Fotográfica"
+        subtitle="Inspección visual de campo"
+        onClose={() => setZoomPhoto(null)}
+      />
     </ScrollView>
   </View>
   );

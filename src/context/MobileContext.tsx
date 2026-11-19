@@ -1,5 +1,4 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
-import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Agente } from '../types/agente';
 import { ReporteInfraccion } from '../types/reporte';
@@ -111,7 +110,9 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [isOnline, setIsOnline] = useState<boolean>(true);
 
   const agenteRef = React.useRef(agenteActual);
-  agenteRef.current = agenteActual;
+  useEffect(() => {
+    agenteRef.current = agenteActual;
+  }, [agenteActual]);
 
   const cargarCatalogo = useCallback(async (forceRefresh = false) => {
     try {
@@ -463,6 +464,45 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setReportes([]);
   }, []);
 
+  const submitReportOrQueue = useCallback(async (
+    params: {
+      idVehiculo: number;
+      idCorbatin?: number | null;
+      idInfraccion: number;
+      idUsuario: number;
+      ubicacionTexto?: string;
+      descripcionHechos: string;
+      evidencias?: { fotoUrl: string; descripcion?: string; fechaHora?: string }[];
+      evidenciasUrls?: string[];
+    },
+    logContext: string
+  ) => {
+    let dbReporteId: number | null = null;
+    let uploadedEvidencias: { fotoUrl: string; descripcion?: string; fechaHora?: string }[] | null = null;
+    const online = await isNetworkConnected();
+
+    if (online) {
+      try {
+        const dbRes = await SupabaseService.crearReporteInfraccion(params);
+        if (dbRes?.idReporte) {
+          dbReporteId = dbRes.idReporte;
+          if (dbRes.evidencias && dbRes.evidencias.length > 0) {
+            uploadedEvidencias = dbRes.evidencias;
+          }
+        }
+      } catch (e) {
+        console.warn(`[MobileContext] ${logContext}:`, e);
+      }
+    }
+
+    const folioNum = Math.floor(1000 + Math.random() * 9000);
+    const isOffline = !dbReporteId;
+    const finalId = dbReporteId ? `rep_${dbReporteId}` : `pending_${Date.now()}`;
+    const finalFolio = dbReporteId ? `F-2026-${String(dbReporteId).padStart(4, '0')}` : `F-2026-PEND-${folioNum}`;
+
+    return { dbReporteId, uploadedEvidencias, isOffline, finalId, finalFolio };
+  }, []);
+
   const agregarReporte = useCallback(async (
     nuevo: Omit<ReporteInfraccion, 'id' | 'folio' | 'fecha' | 'hora' | 'estado' | 'historial' | 'agenteId'> & {
       idVehiculo?: number;
@@ -557,29 +597,10 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return borradorCompleto.folio;
     }
 
-    let dbReporteId: number | null = null;
-    let uploadedEvidencias: Array<{ fotoUrl: string; descripcion?: string; fechaHora?: string }> | null = null;
-    const isOnline = await isNetworkConnected();
-
-    // Si hay internet, intentar guardar de inmediato en el servidor
-    if (isOnline) {
-      try {
-        const dbRes = await SupabaseService.crearReporteInfraccion(payloadParams);
-        if (dbRes?.idReporte) {
-          dbReporteId = dbRes.idReporte;
-          if (dbRes.evidencias && dbRes.evidencias.length > 0) {
-            uploadedEvidencias = dbRes.evidencias;
-          }
-        }
-      } catch (e) {
-        console.warn('[MobileContext] Error guardando directamente en Supabase:', e);
-      }
-    }
-
-    // Si falló el envío o no había conexión y es un reporte pendiente, encolar offline
-    const isOffline = !dbReporteId;
-    const finalId = dbReporteId ? `rep_${dbReporteId}` : `pending_${Date.now()}`;
-    const finalFolio = dbReporteId ? `F-2026-${String(dbReporteId).padStart(4, '0')}` : `F-2026-PEND-${folioNum}`;
+    const { dbReporteId, uploadedEvidencias, isOffline, finalId, finalFolio } = await submitReportOrQueue(
+      payloadParams,
+      'Error guardando directamente en Supabase'
+    );
 
     const completo: ReporteInfraccion = {
       ...nuevo,
@@ -631,7 +652,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     return completo.folio;
-  }, [agenteActual, catalogoInfracciones]);
+  }, [agenteActual, catalogoInfracciones, submitReportOrQueue]);
 
   const enviarBorrador = useCallback(async (draftId: string): Promise<string> => {
     const drafts = await getDraftReports();
@@ -642,24 +663,10 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     const now = new Date();
-    const folioNum = Math.floor(1000 + Math.random() * 9000);
-    let dbReporteId: number | null = null;
-    const online = await isNetworkConnected();
-
-    if (online) {
-      try {
-        const dbRes = await SupabaseService.crearReporteInfraccion(targetDraft.params);
-        if (dbRes?.idReporte) {
-          dbReporteId = dbRes.idReporte;
-        }
-      } catch (e) {
-        console.warn('[MobileContext] Error enviando borrador al servidor:', e);
-      }
-    }
-
-    const isOffline = !dbReporteId;
-    const finalId = dbReporteId ? `rep_${dbReporteId}` : `pending_${Date.now()}`;
-    const finalFolio = dbReporteId ? `F-2026-${String(dbReporteId).padStart(4, '0')}` : `F-2026-PEND-${folioNum}`;
+    const { isOffline, finalId, finalFolio } = await submitReportOrQueue(
+      targetDraft.params,
+      'Error enviando borrador al servidor'
+    );
 
     const actualizado: ReporteInfraccion = {
       ...targetDraft.reporteCompleto,
@@ -700,7 +707,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     return finalFolio;
-  }, [agenteActual.nombre]);
+  }, [agenteActual.nombre, submitReportOrQueue]);
 
   const eliminarBorrador = useCallback(async (draftId: string): Promise<void> => {
     await removeDraftReport(draftId);

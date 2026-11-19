@@ -20,6 +20,7 @@ import { ResortHeader } from '../components/resort-header';
 import { useMobile } from '../context/MobileContext';
 import { SupabaseService } from '../services/supabaseService';
 import { ReglamentoRow } from '../types/database';
+import { formatFecha as formatFechaBase } from '../utils/dateFormat';
 
 export default function ReglamentoScreen() {
   const { reglamentos: contextReglamentos, catalogoInfracciones, cargarCatalogo } = useMobile();
@@ -144,24 +145,11 @@ export default function ReglamentoScreen() {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2500);
     } else {
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2500);
+      handlePrintOrShare();
     }
   };
 
-  const formatFecha = (fechaStr?: string | null) => {
-    if (!fechaStr) return '01/09/2026';
-    try {
-      const clean = fechaStr.split('T')[0];
-      const parts = clean.split('-');
-      if (parts.length === 3) {
-        return `${parts[2]}/${parts[1]}/${parts[0]}`;
-      }
-      return clean;
-    } catch {
-      return fechaStr;
-    }
-  };
+  const formatFecha = (fechaStr?: string | null) => formatFechaBase(fechaStr, '01/09/2026');
 
   return (
     <ScrollView

@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   StyleSheet,
   ScrollView,
   Pressable,
   TextInput,
-  Dimensions,
   Modal,
   Animated,
   Platform,
@@ -20,10 +19,15 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { ReporteInfraccion } from '../types/reporte';
 import { Evidencia } from '../types/evidencia';
-import { SupabaseService } from '../services/supabaseService';
 import { getLocalDateStr } from '../services/apiService';
 import { SocialSyncPill } from '@/components/social-sync-pill';
 import { useSocialRefresh } from '../hooks/use-social-refresh';
+import {
+  filterOfficerReports,
+  getOfficerReportCounts,
+  getReportStatusMeta,
+  loadReportEvidenciaPhotos,
+} from '../utils/reportHelpers';
 
 const RESORT_SLIDES = [
   require('@/assets/images/resort-1.jpg'),
@@ -32,7 +36,7 @@ const RESORT_SLIDES = [
 ];
 
 // Isolated memoized clock to prevent re-rendering the entire dashboard 60 times/min
-const LiveClock = React.memo(() => {
+const LiveClock = React.memo(function LiveClock() {
   const [currentTime, setCurrentTime] = useState(() => {
     const now = new Date();
     return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
@@ -68,7 +72,7 @@ export default function HomeDashboard() {
 
   // Background animated crossfade
   const [bgIndex, setBgIndex] = useState(0);
-  const fadeAnim = useRef(new Animated.Value(1)).current;
+  const [fadeAnim] = useState(() => new Animated.Value(1));
 
   // Selected Report Modal
   const [selectedReport, setSelectedReport] = useState<ReporteInfraccion | null>(null);
@@ -77,25 +81,13 @@ export default function HomeDashboard() {
 
   const handleOpenReportModal = async (rep: ReporteInfraccion) => {
     setSelectedReport(rep);
-    if (rep.evidencias && rep.evidencias.length > 0) {
-      const faltanFotos = rep.evidencias.some((ev) => !ev.fotoUrl);
-      if (faltanFotos) {
-        setLoadingPhotos(true);
-        try {
-          const evidenciasActualizadas = await Promise.all(
-            rep.evidencias.map(async (ev) => {
-              if (ev.fotoUrl) return ev;
-              const fotoBase64 = await SupabaseService.getEvidenciaFoto(ev.id);
-              return {
-                ...ev,
-                fotoUrl: fotoBase64 || '',
-              };
-            })
-          );
-          setSelectedReport((prev) => (prev ? { ...prev, evidencias: evidenciasActualizadas } : null));
-        } finally {
-          setLoadingPhotos(false);
-        }
+    if (rep.evidencias?.some((ev) => !ev.fotoUrl)) {
+      setLoadingPhotos(true);
+      try {
+        const updated = await loadReportEvidenciaPhotos(rep);
+        setSelectedReport((prev) => (prev ? { ...prev, evidencias: updated.evidencias } : null));
+      } finally {
+        setLoadingPhotos(false);
       }
     }
   };
@@ -119,10 +111,8 @@ export default function HomeDashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  // En app/index.tsx (alrededor de la línea ~70)
-
   const misReportes = useMemo(
-    () => (reportes || []).filter((r) => r.agenteId === agenteActual.id || (r as any).id_usuario === Number(agenteActual.id)),
+    () => filterOfficerReports(reportes, agenteActual.id),
     [reportes, agenteActual.id]
   );
 
@@ -133,13 +123,8 @@ export default function HomeDashboard() {
     [misReportes, todayIso]
   );
 
-  const pendientesCount = useMemo(
-    () => misReportes.filter((r) => r.estado === 'pendiente' || r.estado === 'borrador' || (r as any).estatus_revision === 'pendiente').length,
-    [misReportes]
-  );
-
-  const aprobadosCount = useMemo(
-    () => misReportes.filter((r) => r.estado === 'aprobado' || (r as any).estatus_revision === 'aprobada').length,
+  const { pendientes: pendientesCount, aprobados: aprobadosCount } = useMemo(
+    () => getOfficerReportCounts(misReportes),
     [misReportes]
   );
 
@@ -352,13 +337,7 @@ export default function HomeDashboard() {
 
           <View style={styles.reportItemList}>
             {misReportes.slice(0, 3).map((rep) => {
-              const statusColors = {
-                pendiente: { bg: '#FEF3C7', text: '#D97706', label: 'Pendiente' },
-                aprobado: { bg: '#ECFDF5', text: '#059669', label: 'Aprobado' },
-                rechazado: { bg: '#FEF2F2', text: '#DC2626', label: 'Rechazado' },
-                borrador: { bg: '#F1F5F9', text: '#475569', label: 'Borrador' },
-                informacion_solicitada: { bg: '#EFF6FF', text: '#2563EB', label: 'En Revisión' },
-              }[rep.estado] || { bg: '#F1F5F9', text: '#475569', label: rep.estado };
+              const statusMeta = getReportStatusMeta(rep.estado, rep.isOfflinePending);
 
               return (
                 <Pressable
@@ -383,9 +362,9 @@ export default function HomeDashboard() {
                     </View>
                   </View>
 
-                  <View style={[styles.statusBadgePill, { backgroundColor: statusColors.bg }]}>
-                    <ThemedText style={[styles.statusBadgeText, { color: statusColors.text }]}>
-                      {statusColors.label}
+                  <View style={[styles.statusBadgePill, { backgroundColor: statusMeta.bgColor }]}>
+                    <ThemedText style={[styles.statusBadgeText, { color: statusMeta.color }]}>
+                      {statusMeta.shortLabel}
                     </ThemedText>
                   </View>
                 </Pressable>

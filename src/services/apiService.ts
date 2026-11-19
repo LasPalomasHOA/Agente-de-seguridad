@@ -11,10 +11,11 @@ import {
   ReglaReincidenciaRow,
 } from '../types/database';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
-import { supabase, isSupabaseConfigured, PROJECTIONS, getCountOptimized } from '../lib/supabase';
-import { uploadEvidenciaASupabase, comprimirImagen } from './imageService';
+import { supabase, isSupabaseConfigured, PROJECTIONS } from '../lib/supabase';
+import { uploadEvidenciaASupabase } from './imageService';
 import {
   searchOfflineVehicleCatalog,
   saveVehicleToOfflineCatalog,
@@ -60,8 +61,6 @@ export interface CorbatinLookupResult {
   ultimoAcceso?: BitacoraAccesoRow | null;
   isOfflineData?: boolean;
 }
-
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Almacenamiento seguro y persistente para caché entre sesiones y recargas
 const memoryStorageMap = new Map<string, string>();
@@ -114,14 +113,6 @@ export const ImageCacheStore = {
   setVehiclePhoto(idVehiculo: number | string, photoUrl: string): void {
     if (!idVehiculo || !photoUrl || typeof photoUrl !== 'string' || photoUrl.trim().length === 0) return;
     safeStorage.setItem(`hoa_photo_veh_${idVehiculo}`, photoUrl);
-  },
-  getUserAvatar(idUsuario: number | string): string | null {
-    if (!idUsuario) return null;
-    return safeStorage.getItem(`hoa_photo_user_${idUsuario}`);
-  },
-  setUserAvatar(idUsuario: number | string, avatarUrl: string): void {
-    if (!idUsuario || !avatarUrl || typeof avatarUrl !== 'string' || avatarUrl.trim().length === 0) return;
-    safeStorage.setItem(`hoa_photo_user_${idUsuario}`, avatarUrl);
   },
 };
 
@@ -401,35 +392,21 @@ class PersistentApiCache {
     if (!keyPrefix) {
       this.memoryCache.clear();
       memoryStorageMap.clear();
-      if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-        try {
-          const keys = Object.keys(window.localStorage);
-          keys.filter((k) => k.startsWith('hoa_cache_')).forEach((k) => window.localStorage.removeItem(k));
-        } catch { }
+    } else {
+      for (const key of this.memoryCache.keys()) {
+        if (key.startsWith(keyPrefix)) this.memoryCache.delete(key);
       }
-      return;
-    }
-
-    // 1. Limpiar memoria RAM
-    for (const key of this.memoryCache.keys()) {
-      if (key.startsWith(keyPrefix)) {
-        this.memoryCache.delete(key);
+      for (const key of Array.from(memoryStorageMap.keys())) {
+        if (key.startsWith(`hoa_cache_${keyPrefix}`)) memoryStorageMap.delete(key);
       }
     }
 
-    // 2. Limpiar memoryStorageMap
-    const memoryKeys = Array.from(memoryStorageMap.keys());
-    for (const key of memoryKeys) {
-      if (key.startsWith(`hoa_cache_${keyPrefix}`)) {
-        memoryStorageMap.delete(key);
-      }
-    }
-
-    // 3. Limpiar localStorage en Web (Extracción estática para no mutar el índice en iteración)
     if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
       try {
-        const keys = Object.keys(window.localStorage);
-        keys.filter((k) => k.startsWith(`hoa_cache_${keyPrefix}`)).forEach((k) => window.localStorage.removeItem(k));
+        const prefix = `hoa_cache_${keyPrefix || ''}`;
+        Object.keys(window.localStorage)
+          .filter((k) => k.startsWith(prefix))
+          .forEach((k) => window.localStorage.removeItem(k));
       } catch { }
     }
   }
@@ -529,37 +506,6 @@ export const getLocalDateTimeFromUtc = (
   };
 };
 
-export const parseUtcTimestampToLocalTimeStr = (
-  isoTimestamp?: string | null,
-  fallbackTimeStr?: string | null
-): string | null => {
-  const val = isoTimestamp || fallbackTimeStr;
-  if (!val || typeof val !== 'string') return null;
-  const clean = val.trim();
-  if (!clean || clean === 'null' || clean === 'undefined') return null;
-
-  if (clean.includes('T') || (clean.includes('-') && clean.includes(':'))) {
-    const d = new Date(parseSqlUtcDate(clean));
-    if (!isNaN(d.getTime())) {
-      return getLocalTimeStr(d);
-    }
-  }
-
-  // Extraer hora y minutos de formato TIME puro en UTC
-  const match = clean.match(/(?:T|\s|^)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (match) {
-    const utcHour = parseInt(match[1], 10);
-    const min = match[2];
-    const sec = match[3] || '00';
-    let localHour = utcHour - 7;
-    if (localHour < 0) localHour += 24;
-    localHour = localHour % 24;
-    return `${String(localHour).padStart(2, '0')}:${min}:${sec}`;
-  }
-
-  return clean;
-};
-
 export const normalizeEstadoReporte = (
   rawStatus?: string | null
 ): 'aprobado' | 'rechazado' | 'borrador' | 'informacion_solicitada' | 'pendiente' => {
@@ -571,17 +517,114 @@ export const normalizeEstadoReporte = (
   return 'pendiente';
 };
 
+const VALID_ACTIVE_SANCION_STATUSES = new Set([
+  'activa',
+  'activo',
+  'ratificada',
+  'en_apelacion',
+  'programada',
+  'permanente',
+]);
+
+const defaultHorasSuspension = (nivel: number): number => {
+  if (nivel === 1) return 0;
+  if (nivel === 2) return 24;
+  if (nivel === 3) return 168;
+  return -1;
+};
+
+const normalizeSancionesActivas = (sanciones: any[]): SancionDbRow[] =>
+  (sanciones || [])
+    .filter((s: any) => VALID_ACTIVE_SANCION_STATUSES.has((s.estatus || 'activa').toString().trim().toLowerCase()))
+    .map((s: any) => ({
+      ...s,
+      id_reporte: s.id_reporte || 1,
+      id_regla: s.id_regla || s.numero_reincidencia || 1,
+      numero_reincidencia: s.numero_reincidencia || s.id_regla || 1,
+      fecha_inicio: s.fecha_inicio || new Date().toISOString(),
+      fecha_fin: s.fecha_fin || null,
+      estatus: (s.estatus?.toLowerCase() as any) || 'activa',
+      motivo: s.motivo || 'Falta al reglamento',
+      id_usuario: s.id_usuario || 1,
+      created_at: s.created_at || new Date().toISOString(),
+      updated_at: s.updated_at || new Date().toISOString(),
+    }));
+
+const parseMotivoTag = <T = any>(motivo: string | undefined | null, tag: string): T | null => {
+  if (!motivo) return null;
+  const openTag = `[${tag}]`;
+  const idx = motivo.indexOf(openTag);
+  if (idx === -1) return null;
+  try {
+    const jsonPart = motivo
+      .substring(idx + openTag.length)
+      .replace(new RegExp(`\\[\\/${tag}\\].*$`, 's'), '')
+      .split(/\[[A-Z_]+\]/)[0]
+      .trim();
+    return JSON.parse(jsonPart) as T;
+  } catch {
+    return null;
+  }
+};
+
+const syncLocalBitacoraCache = (
+  idVehiculo: number,
+  idCorbatin: number | null | undefined,
+  acceso: BitacoraAccesoRow
+): void => {
+  try {
+    const map: Record<string, BitacoraAccesoRow> = JSON.parse(safeStorage.getItem('hoa_local_bitacora_map') || '{}') || {};
+    map[String(idVehiculo)] = acceso;
+    safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
+  } catch { }
+
+  apiCache.invalidate(`ultimo_acceso_veh_${idVehiculo}`);
+  if (idCorbatin) apiCache.invalidate(`ultimo_acceso_corb_${idCorbatin}`);
+
+  const cachedVeh = apiCache.get<CorbatinLookupResult>(`lookup_veh_${idVehiculo}`, TTL_LOOKUPS);
+  if (cachedVeh) cachedVeh.ultimoAcceso = acceso;
+  if (idCorbatin) {
+    const cachedNum = apiCache.get<CorbatinLookupResult>(`lookup_num_${idCorbatin}`, TTL_LOOKUPS);
+    if (cachedNum) cachedNum.ultimoAcceso = acceso;
+  }
+};
+
+const computeReportesDelta = (
+  rows: any[],
+  totalCount: number,
+  expectedCount: number,
+  latestReportId?: number,
+  normalizedExpectedLatestStatus?: string,
+  statusMap?: Record<number, string>
+) => {
+  const latestItem = rows.length > 0 ? rows[0] : null;
+  const dbLatestId = latestItem ? Number(latestItem.id_reporte) : 0;
+  const dbLatestStatus = latestItem ? normalizeEstadoReporte(latestItem.estatus_revision) : '';
+  const hasCountChange = expectedCount !== totalCount;
+  const hasIdChange =
+    latestReportId !== undefined && latestReportId > 0
+      ? dbLatestId !== Number(latestReportId)
+      : dbLatestId > 0;
+  const hasTopStatusChange =
+    normalizedExpectedLatestStatus !== undefined &&
+    dbLatestId > 0 &&
+    dbLatestStatus !== normalizedExpectedLatestStatus;
+  const hasAnyRowStatusChange = statusMap
+    ? rows.some((r: any) => {
+        const prevSt = statusMap[Number(r.id_reporte)];
+        return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
+      })
+    : false;
+
+  return {
+    hasChanges: hasCountChange || hasIdChange || hasTopStatusChange || hasAnyRowStatusChange,
+    totalCount,
+    latestId: dbLatestId,
+    latestStatus: dbLatestStatus,
+  };
+};
+
 export const ApiService = {
-  /**
-   * Verifica el estado del servidor Express / PostgreSQL
-   */
-  async checkStatus(): Promise<{ status: string; timestamp?: string } | null> {
-    try {
-      return await fetchJson('/status');
-    } catch {
-      return null;
-    }
-  },
 
   /**
    * Autentica al agente con correo/usuario y contraseña con el servidor Express/PostgreSQL
@@ -655,200 +698,6 @@ export const ApiService = {
       console.warn('[ApiService] Error en login:', e.message);
       return null;
     }
-  },
-
-  /**
-   * Obtiene la lista de usuarios con caché persistente y proyección de campos
-   */
-  async getUsuarios(): Promise<any[]> {
-    return apiCache.getOrFetch('usuarios_list', TTL_USERS, async () => {
-      try {
-        const data = await fetchJson('/usuarios');
-        if (Array.isArray(data)) {
-          return data;
-        }
-      } catch {
-        if (isSupabaseConfigured()) {
-          const { data } = await supabase
-            .from('usuarios')
-            .select(PROJECTIONS.USUARIOS_LIGHT)
-            .eq('activo', true)
-            .limit(50);
-          if (data && Array.isArray(data)) {
-            return data;
-          }
-        }
-      }
-      return [];
-    });
-  },
-
-  /**
-   * Extrae candidatos de búsqueda a partir de cualquier formato ingresado o escaneado
-   */
-  extractSearchTokens(raw: string): { numbers: number[]; tokens: string[]; plates: string[] } {
-    const clean = (raw || '').trim();
-    const isPureNumber = /^\d+$/.test(clean);
-    const candidates: {
-      numbers: number[];
-      tokens: string[];
-      plates: string[];
-    } = {
-      numbers: [],
-      tokens: [clean],
-      // Solo inicializar en placas si NO es un número puro
-      plates: isPureNumber ? [] : [clean],
-    };
-
-    if (!clean) return candidates;
-
-    // 1. Formatos estructurados delimitados
-    const delimiterPattern = /[|;,\n\r&]+/;
-    if (delimiterPattern.test(clean)) {
-      const segments = clean.split(delimiterPattern).map((s) => s.trim()).filter(Boolean);
-      for (const seg of segments) {
-        candidates.tokens.push(seg);
-        if (seg.includes(':') || seg.includes('=')) {
-          const [keyPart, ...valParts] = seg.split(/[:=]/);
-          const key = keyPart.trim().toUpperCase();
-          const val = valParts.join(':').trim();
-          if (val) {
-            candidates.tokens.push(val);
-            if (/^(?:CORB|CORBATIN|CORB[-_ ]*VERDE|CORBATIN[-_ ]*VERDE|VERDE|NUM|NUMERO|NO|TAG)$/i.test(key)) {
-              const numVal = parseInt(val.replace(/\D/g, ''), 10);
-              if (!isNaN(numVal) && numVal > 0) {
-                candidates.numbers.push(numVal);
-              }
-            }
-            if (/^(?:PLACA|PLACAS|PLATE|PLATES)$/i.test(key)) {
-              if (
-                val.toUpperCase() !== 'X' &&
-                val.toUpperCase() !== 'N/A' &&
-                val.toUpperCase() !== 'S/P' &&
-                val.toUpperCase() !== 'SIN'
-              ) {
-                candidates.plates.push(val);
-                candidates.plates.push(val.replace(/[-_ ]/g, ''));
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 2. Extracción directa con Expresiones Regulares para corbatín (incluyendo corbatines verdes y normales)
-    const corbMatches = clean.matchAll(/(?:CORB(?:ATIN)?(?:[-_ ]*VERDE)?|NUM(?:ERO)?|TAG|VERDE|C)[-:_ #=]*(?:20\d\d[-_ ]*)?0*(\d+)/gi);
-    for (const match of corbMatches) {
-      if (match[1]) {
-        const n = parseInt(match[1], 10);
-        if (!isNaN(n) && n > 0 && !(clean.includes('VIG') && (n === 2026 || n === 2027))) {
-          candidates.numbers.push(n);
-        }
-      }
-    }
-
-    // Extracción de placas
-    const plateMatches = clean.matchAll(/(?:PLACA(?:S)?|PLATE(?:S)?)[-:_ #=]*([A-Za-z0-9-]+)/gi);
-    for (const match of plateMatches) {
-      if (match[1] && match[1].toUpperCase() !== 'X' && match[1].toUpperCase() !== 'NA') {
-        candidates.plates.push(match[1]);
-        candidates.plates.push(match[1].replace(/[-_ ]/g, ''));
-      }
-    }
-
-    // 3. JSON parse
-    if ((clean.startsWith('{') && clean.endsWith('}')) || (clean.startsWith('[') && clean.endsWith(']'))) {
-      try {
-        const parsed = JSON.parse(clean);
-        if (typeof parsed === 'object' && parsed !== null) {
-          if (parsed.numero !== undefined) candidates.numbers.push(Number(parsed.numero));
-          if (parsed.corbatin !== undefined) candidates.numbers.push(Number(parsed.corbatin));
-          if (parsed.qr_token) candidates.tokens.push(String(parsed.qr_token));
-          if (parsed.token) candidates.tokens.push(String(parsed.token));
-          if (parsed.placas) candidates.plates.push(String(parsed.placas));
-          if (parsed.placa) candidates.plates.push(String(parsed.placa));
-        }
-      } catch { }
-    }
-
-    // 4. URL parse
-    if (clean.includes('http://') || clean.includes('https://') || clean.includes('?')) {
-      try {
-        const urlParts = clean.split('?');
-        if (urlParts[1]) {
-          const queryParams = new URLSearchParams(urlParts[1]);
-          const num = queryParams.get('numero') || queryParams.get('corbatin') || queryParams.get('corb');
-          if (num && !isNaN(Number(num))) candidates.numbers.push(Number(num));
-          const tok = queryParams.get('token') || queryParams.get('qr');
-          if (tok) candidates.tokens.push(tok);
-          const pl = queryParams.get('placa') || queryParams.get('placas');
-          if (pl) candidates.plates.push(pl);
-        }
-        const pathSegments = urlParts[0].split('/').filter(Boolean);
-        const lastSegment = pathSegments[pathSegments.length - 1];
-        if (lastSegment) {
-          candidates.tokens.push(lastSegment);
-          if (!isNaN(Number(lastSegment))) candidates.numbers.push(Number(lastSegment));
-        }
-      } catch { }
-    }
-
-    // 5. Número entero directo
-    if (isPureNumber) {
-      candidates.numbers.push(parseInt(clean, 10));
-    }
-
-    // 6. Formatos con prefijos
-    const prefixMatch = clean.match(/^(?:C|CORB|CORBATIN|CORB[-_ ]*VERDE|VERDE|LP|V)[-_ #=]*(?:20\d\d[-_ ]*)?0*(\d+)$/i);
-    if (prefixMatch && prefixMatch[1]) {
-      candidates.numbers.push(parseInt(prefixMatch[1], 10));
-    }
-
-    // 7. Segmento numérico final
-    const parts = clean.split(/[-_/ ]+/).filter(Boolean);
-    if (parts.length > 1) {
-      const lastPart = parts[parts.length - 1];
-      if (/^\d+$/.test(lastPart) && lastPart !== '2026' && lastPart !== '2027') {
-        candidates.numbers.push(parseInt(lastPart, 10));
-      }
-    }
-
-    // 8. Extracción de dígitos
-    if (!clean.includes('|')) {
-      const digitsOnly = clean.replace(/\D/g, '');
-      if (digitsOnly) {
-        if (digitsOnly.startsWith('2026') && digitsOnly.length > 4) {
-          candidates.numbers.push(parseInt(digitsOnly.slice(4), 10));
-        } else if (digitsOnly.startsWith('2025') && digitsOnly.length > 4) {
-          candidates.numbers.push(parseInt(digitsOnly.slice(4), 10));
-        }
-        candidates.numbers.push(parseInt(digitsOnly, 10));
-      }
-    }
-
-    candidates.tokens.push(clean.replace(/[-_ ]/g, ''));
-    if (!isPureNumber) {
-      candidates.plates.push(clean.replace(/[-_ ]/g, ''));
-    }
-
-    candidates.numbers = Array.from(new Set(candidates.numbers.filter((n) => !isNaN(n) && n > 0)));
-    candidates.tokens = Array.from(new Set(candidates.tokens.filter(Boolean)));
-    candidates.plates = Array.from(
-      new Set(
-        candidates.plates.filter((p) => {
-          if (!p || typeof p !== 'string') return false;
-          const up = p.trim().toUpperCase();
-          if (up === 'SIN' || up === 'N/A' || up === 'S/P' || up === 'X') return false;
-          // Descartar dígitos puros si el texto original no tenía prefijo explícito de placas
-          if (/^\d+$/.test(up) && !clean.toUpperCase().includes('PLACA') && !clean.toUpperCase().includes('PLATE')) {
-            return false;
-          }
-          return up.length >= 3;
-        })
-      )
-    );
-
-    return candidates;
   },
 
   /**
@@ -972,26 +821,9 @@ export const ApiService = {
 
             cachedResult.ultimoAcceso = liveAcceso || cachedResult.ultimoAcceso || null;
             if (Array.isArray(liveSanciones)) {
-              const validStatuses = new Set([
-                'activa',
-                'activo',
-                'ratificada',
-                'en_apelacion',
-                'programada',
-                'permanente',
-              ]);
-              cachedResult.sancionesActivas = liveSanciones
-                .filter((s: any) => validStatuses.has((s.estatus || 'activa').toString().trim().toLowerCase()))
-                .map((s: any) => ({
-                  ...s,
-                  id_regla: s.id_regla || s.numero_reincidencia || 1,
-                  numero_reincidencia: s.numero_reincidencia || s.id_regla || 1,
-                  estatus: (s.estatus?.toLowerCase() as any) || 'activa',
-                }));
+              cachedResult.sancionesActivas = normalizeSancionesActivas(liveSanciones);
             }
-          } catch {
-            cachedResult.isOfflineData = true;
-          }
+          } catch { }
 
           return cachedResult;
         }
@@ -1278,32 +1110,7 @@ export const ApiService = {
         hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin, false) : Promise.resolve(null),
       ]);
 
-      const validActiveStatuses = new Set([
-        'activa',
-        'activo',
-        'ratificada',
-        'en_apelacion',
-        'programada',
-        'permanente',
-      ]);
-
-      const sancionesActivas = (todasSanciones || [])
-        .filter((s: any) => validActiveStatuses.has((s.estatus || 'activa').toString().trim().toLowerCase()))
-        .map((s: any) => ({
-          id_sancion: s.id_sancion,
-          id_reporte: s.id_reporte || 1,
-          id_vehiculo: s.id_vehiculo,
-          id_empresa: s.id_empresa,
-          id_regla: s.id_regla || s.numero_reincidencia || 1,
-          numero_reincidencia: s.numero_reincidencia || s.id_regla || 1,
-          fecha_inicio: s.fecha_inicio || new Date().toISOString(),
-          fecha_fin: s.fecha_fin || null,
-          estatus: (s.estatus?.toLowerCase() as any) || 'activa',
-          motivo: s.motivo || 'Falta al reglamento',
-          id_usuario: s.id_usuario || 1,
-          created_at: s.created_at || new Date().toISOString(),
-          updated_at: s.updated_at || new Date().toISOString(),
-        }));
+      const sancionesActivas = normalizeSancionesActivas(todasSanciones || []);
 
       const result: CorbatinLookupResult = {
         corbatin: corbatinRow,
@@ -1345,9 +1152,6 @@ export const ApiService = {
         apiCache.setMemoryOnly(`lookup_plate_${vehiculoRow.placas.toUpperCase()}`, result);
       }
 
-      // Guardar vehículo en el catálogo local offline para futuros escaneos sin internet (0 bytes Egress extra)
-      saveVehicleToOfflineCatalog(result).catch(() => { });
-
       return result;
     } catch (e) {
       console.warn('[ApiService] Error en buscarCorbatin, consultando catálogo offline local:', e);
@@ -1360,13 +1164,6 @@ export const ApiService = {
       } catch { }
       return null;
     }
-  },
-
-  /**
-   * Busca un vehículo por su placa (delega a la búsqueda unificada)
-   */
-  async buscarVehiculoPorPlaca(placa: string): Promise<CorbatinLookupResult | null> {
-    return this.buscarCorbatin(placa);
   },
 
   /**
@@ -1506,13 +1303,7 @@ export const ApiService = {
       let h = r.horas_suspension;
       if (h === undefined || h === null) {
         const match = (r.mensaje_alerta || '').match(/\[HORAS:(-?\d+)\]/);
-        if (match) h = parseInt(match[1], 10);
-        else {
-          if (r.numero_falta === 1) h = 0;
-          else if (r.numero_falta === 2) h = 24;
-          else if (r.numero_falta === 3) h = 168;
-          else h = -1;
-        }
+        h = match ? parseInt(match[1], 10) : defaultHorasSuspension(r.numero_falta);
       }
       return {
         id_regla: r.id_regla,
@@ -1581,13 +1372,7 @@ export const ApiService = {
       // Consultar dinámicamente las reglas de reincidencia para respetar las horas configuradas por el supervisor
       const reglas = await this.getReglasReincidencia().catch(() => []);
       const reglaNivel = reglas.find((r) => r.numero_falta === nuevoNivel);
-      let horasSuspension = reglaNivel?.horas_suspension;
-      if (horasSuspension === undefined || horasSuspension === null) {
-        if (nuevoNivel === 1) horasSuspension = 0;
-        else if (nuevoNivel === 2) horasSuspension = 24;
-        else if (nuevoNivel === 3) horasSuspension = 168;
-        else horasSuspension = -1;
-      }
+      const horasSuspension = reglaNivel?.horas_suspension ?? defaultHorasSuspension(nuevoNivel);
 
       let fechaFinStr: string | null = null;
       if (horasSuspension > 0) {
@@ -1857,39 +1642,14 @@ export const ApiService = {
         if (!error) {
           const totalCount = count ?? 0;
           const rows = Array.isArray(data) ? data : [];
-          const latestItem = rows.length > 0 ? rows[0] : null;
-          const dbLatestId = latestItem ? Number(latestItem.id_reporte) : 0;
-          const dbLatestStatus = latestItem ? normalizeEstadoReporte(latestItem.estatus_revision) : '';
-
-          // Comparar contra la ventana paginada real (máximo pageLimit elementos remotos en memoria)
-          const expectedWindowCount = Math.min(totalCount, pageLimit);
-          const hasCountChange = expectedWindowCount !== currentCount;
-          const hasIdChange =
-            latestReportId !== undefined && latestReportId > 0
-              ? dbLatestId !== Number(latestReportId)
-              : dbLatestId > 0;
-          const hasTopStatusChange =
-            normalizedExpectedLatestStatus !== undefined &&
-            dbLatestId > 0 &&
-            dbLatestStatus !== normalizedExpectedLatestStatus;
-
-          // Verificar si algún reporte de la ventana actual cambió de estatus (ej. aprobado/rechazado por supervisor)
-          const hasAnyRowStatusChange = statusMap
-            ? rows.some((r: any) => {
-              const rId = Number(r.id_reporte);
-              const prevSt = statusMap[rId];
-              return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
-            })
-            : false;
-
-          const hasChanges = hasCountChange || hasIdChange || hasTopStatusChange || hasAnyRowStatusChange;
-
-          return {
-            hasChanges,
+          return computeReportesDelta(
+            rows,
             totalCount,
-            latestId: dbLatestId,
-            latestStatus: dbLatestStatus,
-          };
+            Math.min(totalCount, pageLimit),
+            latestReportId,
+            normalizedExpectedLatestStatus,
+            statusMap
+          );
         }
       } catch (err) {
         console.warn('[ApiService] Error en checkReportesDelta Supabase:', err);
@@ -1902,32 +1662,14 @@ export const ApiService = {
       if (idUsuario) queryParams.push(`id_usuario=${idUsuario}`);
       const data = await fetchJson(`/reportes?${queryParams.join('&')}`);
       if (Array.isArray(data)) {
-        const latest = data[0];
-        const dbLatestId = latest ? Number(latest.id_reporte) : 0;
-        const dbLatestStatus = latest ? normalizeEstadoReporte(latest.estatus_revision) : '';
-        const hasCountChange = data.length !== currentCount;
-        const hasIdChange =
-          latestReportId !== undefined && latestReportId > 0
-            ? dbLatestId !== Number(latestReportId)
-            : dbLatestId > 0;
-        const hasTopStatusChange =
-          normalizedExpectedLatestStatus !== undefined &&
-          dbLatestId > 0 &&
-          dbLatestStatus !== normalizedExpectedLatestStatus;
-        const hasAnyRowStatusChange = statusMap
-          ? data.some((r: any) => {
-            const rId = Number(r.id_reporte);
-            const prevSt = statusMap[rId];
-            return prevSt === undefined || normalizeEstadoReporte(r.estatus_revision) !== normalizeEstadoReporte(prevSt);
-          })
-          : false;
-
-        return {
-          hasChanges: hasCountChange || hasIdChange || hasTopStatusChange || hasAnyRowStatusChange,
-          totalCount: data.length,
-          latestId: dbLatestId,
-          latestStatus: dbLatestStatus,
-        };
+        return computeReportesDelta(
+          data,
+          data.length,
+          data.length,
+          latestReportId,
+          normalizedExpectedLatestStatus,
+          statusMap
+        );
       }
     } catch { }
 
@@ -2191,32 +1933,8 @@ export const ApiService = {
       updated_at: utcIsoStr,
     };
 
-    // 1. Guardar en almacenamiento local para respuesta instantánea
-    try {
-      let map: Record<string, BitacoraAccesoRow> = {};
-      const localMapStr = safeStorage.getItem('hoa_local_bitacora_map');
-      if (localMapStr) {
-        map = JSON.parse(localMapStr) || {};
-      }
-      map[String(params.idVehiculo)] = newAcceso;
-      safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
-    } catch { }
-
-    // Invalidar únicamente la caché del último acceso de este vehículo (preserva catálogos de vehículos en RAM)
-    apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
-    if (params.idCorbatin) {
-      apiCache.invalidate(`ultimo_acceso_corb_${params.idCorbatin}`);
-    }
-    const cachedLookupVeh = apiCache.get<CorbatinLookupResult>(`lookup_veh_${params.idVehiculo}`, TTL_LOOKUPS);
-    if (cachedLookupVeh) {
-      cachedLookupVeh.ultimoAcceso = newAcceso;
-    }
-    if (params.idCorbatin) {
-      const cachedLookupNum = apiCache.get<CorbatinLookupResult>(`lookup_num_${params.idCorbatin}`, TTL_LOOKUPS);
-      if (cachedLookupNum) {
-        cachedLookupNum.ultimoAcceso = newAcceso;
-      }
-    }
+    // 1. Guardar en almacenamiento local e invalidar caché de último acceso
+    syncLocalBitacoraCache(params.idVehiculo, params.idCorbatin, newAcceso);
 
     // 2. Enviar a Express Backend
     try {
@@ -2294,14 +2012,10 @@ export const ApiService = {
     const fechaStr = getLocalDateStr(now);
     const utcIsoStr = now.toISOString();
 
-    // 1. Actualizar mapa local inmediatamente
+    // 1. Actualizar mapa local e invalidar caché de último acceso inmediatamente
     let updatedAcceso: BitacoraAccesoRow | null = null;
     try {
-      let map: Record<string, BitacoraAccesoRow> = {};
-      const localMapStr = safeStorage.getItem('hoa_local_bitacora_map');
-      if (localMapStr) {
-        map = JSON.parse(localMapStr) || {};
-      }
+      const map: Record<string, BitacoraAccesoRow> = JSON.parse(safeStorage.getItem('hoa_local_bitacora_map') || '{}') || {};
       const existing = map[String(params.idVehiculo)];
       updatedAcceso = {
         id_acceso: existing?.id_acceso || params.idAcceso || Date.now(),
@@ -2320,25 +2034,8 @@ export const ApiService = {
         created_at: existing?.created_at || utcIsoStr,
         updated_at: utcIsoStr,
       };
-      map[String(params.idVehiculo)] = updatedAcceso;
-      safeStorage.setItem('hoa_local_bitacora_map', JSON.stringify(map));
+      syncLocalBitacoraCache(params.idVehiculo, params.idCorbatin, updatedAcceso);
     } catch { }
-
-    // Invalidar únicamente la clave de último acceso (sin purgar lookup_ global)
-    apiCache.invalidate(`ultimo_acceso_veh_${params.idVehiculo}`);
-    if (params.idCorbatin) {
-      apiCache.invalidate(`ultimo_acceso_corb_${params.idCorbatin}`);
-    }
-    const cachedLookupVeh = apiCache.get<CorbatinLookupResult>(`lookup_veh_${params.idVehiculo}`, TTL_LOOKUPS);
-    if (cachedLookupVeh && updatedAcceso) {
-      cachedLookupVeh.ultimoAcceso = updatedAcceso;
-    }
-    if (params.idCorbatin && updatedAcceso) {
-      const cachedLookupNum = apiCache.get<CorbatinLookupResult>(`lookup_num_${params.idCorbatin}`, TTL_LOOKUPS);
-      if (cachedLookupNum) {
-        cachedLookupNum.ultimoAcceso = updatedAcceso;
-      }
-    }
 
     // 2. Intentar actualizar en Express Backend mediante PUT /bitacora/:id/salida o POST /bitacora
     try {
@@ -2406,113 +2103,6 @@ export const ApiService = {
   },
 
   /**
-   * Registra un evento en la bitácora de accesos
-   */
-  async registrarAccesoBitacora(params: {
-    idCaseta: number;
-    idVehiculo: number;
-    idCorbatin?: number | null;
-    idConductor?: number | null;
-    idUsuario: number;
-    ubicacionTrabajo?: string;
-    estatusAcceso: 'permitido' | 'denegado' | 'salida' | 'forzado';
-    motivoRechazo?: string;
-    observaciones?: string;
-  }): Promise<boolean> {
-    try {
-      const estatusMap: Record<string, string> = {
-        permitido: 'PERMITIDO',
-        denegado: 'DENEGADO',
-        salida: 'SALIDA',
-        forzado: 'FORZADO',
-      };
-      const now = new Date();
-      const fechaStr = getLocalDateStr(now);
-      const utcIsoStr = now.toISOString();
-
-      await fetchJson('/bitacora', {
-        method: 'POST',
-        body: JSON.stringify({
-          id_caseta: params.idCaseta,
-          id_vehiculo: params.idVehiculo,
-          id_corbatin: params.idCorbatin || null,
-          id_conductor: params.idConductor || null,
-          id_usuario: params.idUsuario,
-          fecha: fechaStr,
-          hora_entrada: utcIsoStr,
-          ubicacion_trabajo: params.ubicacionTrabajo || null,
-          estatus_acceso: estatusMap[params.estatusAcceso] || 'PERMITIDO',
-          motivo_rechazo: params.motivoRechazo || null,
-          observaciones: params.observaciones || null,
-        }),
-      });
-
-      return true;
-    } catch {
-      return false;
-    }
-  },
-
-  /**
-   * Obtiene vehículos con proyección ligera y persistencia de fotos en ImageCacheStore
-   */
-  async getVehiculos(): Promise<VehiculoRow[]> {
-    return apiCache.getOrFetch('vehiculos_list', TTL_VEHICLES_CORBATINES, async () => {
-      try {
-        const data = await fetchJson('/vehiculos?limit=50');
-        if (Array.isArray(data)) {
-          return data.map((v: any) => {
-            const f = v.foto_url || v.foto;
-            if (f && v.id_vehiculo) {
-              ImageCacheStore.setVehiclePhoto(v.id_vehiculo, f);
-            }
-            return {
-              ...v,
-              foto_url: f || ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
-            };
-          });
-        }
-      } catch {
-        if (isSupabaseConfigured()) {
-          const { data } = await supabase
-            .from('vehiculos')
-            .select(PROJECTIONS.VEHICULOS_LIGHT)
-            .limit(50);
-
-          if (data && Array.isArray(data)) {
-            return data.map((v: any) => {
-              const f = v.foto_url || v.foto;
-              if (f && v.id_vehiculo) {
-                ImageCacheStore.setVehiclePhoto(v.id_vehiculo, f);
-              }
-              return {
-                ...v,
-                foto_url: f || ImageCacheStore.getVehiclePhoto(v.id_vehiculo) || null,
-              };
-            }) as VehiculoRow[];
-          }
-        }
-      }
-      return [];
-    });
-  },
-
-  /**
-   * Obtiene empresas con proyección ligera
-   */
-  async getEmpresas(): Promise<EmpresaRow[]> {
-    return apiCache.getOrFetch('empresas_list', TTL_STATIC_CATALOGS, async () => {
-      try {
-        const data = await fetchJson('/empresas?limit=50');
-        if (Array.isArray(data)) {
-          return data;
-        }
-      } catch { }
-      return [];
-    });
-  },
-
-  /**
    * Obtiene corbatines con proyección ligera
    */
   async getCorbatines(): Promise<CorbatinRow[]> {
@@ -2564,8 +2154,8 @@ export const ApiService = {
     const cacheKey = `sanciones_list_${idVehiculo || 'all'}`;
     if (forceRefresh) {
       apiCache.invalidate(cacheKey);
-      httpEtagCache.delete(`/sanciones?id_vehiculo=${idVehiculo}&limit=50`);
-      httpEtagCache.delete(`/sanciones?id_vehiculo=${idVehiculo}&estatus=activa&limit=10`);
+      httpEtagCache.delete(`${API_BASE_URL}/sanciones?id_vehiculo=${idVehiculo}&limit=50`);
+      httpEtagCache.delete(`${API_BASE_URL}/sanciones?id_vehiculo=${idVehiculo}&estatus=activa&limit=10`);
     }
 
     const normalizeAndComputeReincidencias = (rawRows: any[], unlinkedApprovedReportsCount = 0): any[] => {
@@ -2579,70 +2169,23 @@ export const ApiService = {
       // Helper para detectar si una sanción fue apelada/cancelada o levantada definitivamente
       const isCancelledOrLifted = (s: any): boolean => {
         const est = (s.estatus || s.status || '').toString().trim().toUpperCase();
-        if (
-          est === 'CANCELADA' ||
-          est === 'CANCELADO' ||
-          est === 'ACLARADA' ||
-          est === 'ACLARADO' ||
-          est === 'LEVANTADA' ||
-          est === 'LEVANTADO'
-        ) {
+        if (['CANCELADA', 'CANCELADO', 'ACLARADA', 'ACLARADO', 'LEVANTADA', 'LEVANTADO'].includes(est)) {
           return true;
         }
-        const rawMotivo = s.motivo || '';
-        const resIdx = rawMotivo.indexOf('[RESOLUCION_OFICINA_DATA]');
-        if (resIdx !== -1) {
-          try {
-            const jsonPart = rawMotivo
-              .substring(resIdx + '[RESOLUCION_OFICINA_DATA]'.length)
-              .replace(/\[\/RESOLUCION_OFICINA_DATA\].*$/s, '')
-              .split(/\[[A-Z_]+\]/)[0]
-              .trim();
-            const parsedRes = JSON.parse(jsonPart);
-            const tipoRes = parsedRes.tipoResolucion || parsedRes.tipo_resolucion;
-            if (tipoRes === 'levantamiento_definitivo') {
-              return true;
-            }
-          } catch { }
-        }
-        if (s.resolucionOficina?.tipoResolucion === 'levantamiento_definitivo') {
-          return true;
-        }
-        return false;
+        const parsedRes = parseMotivoTag<any>(s.motivo, 'RESOLUCION_OFICINA_DATA');
+        const tipoRes = parsedRes?.tipoResolucion || parsedRes?.tipo_resolucion || s.resolucionOficina?.tipoResolucion;
+        return tipoRes === 'levantamiento_definitivo';
       };
 
       // Helper para detectar si una sanción tiene un permiso temporal vigente hoy
       const hasActiveTemporaryPermit = (s: any): boolean => {
-        const rawMotivo = s.motivo || '';
-        const resIdx = rawMotivo.indexOf('[RESOLUCION_OFICINA_DATA]');
-        if (resIdx !== -1) {
-          try {
-            const jsonPart = rawMotivo
-              .substring(resIdx + '[RESOLUCION_OFICINA_DATA]'.length)
-              .replace(/\[\/RESOLUCION_OFICINA_DATA\].*$/s, '')
-              .split(/\[[A-Z_]+\]/)[0]
-              .trim();
-            const parsedRes = JSON.parse(jsonPart);
-            const tipoRes = parsedRes.tipoResolucion || parsedRes.tipo_resolucion;
-            const expStr = parsedRes.fechaExpiracionPermiso || parsedRes.permiso_temporal_hasta;
-            if (tipoRes === 'permiso_temporal' && expStr) {
-              const expDate = new Date(expStr);
-              if (new Date() < expDate) {
-                return true;
-              }
-            }
-          } catch { }
-        }
-        if (
-          s.resolucionOficina?.tipoResolucion === 'permiso_temporal' &&
-          s.resolucionOficina?.fechaExpiracionPermiso
-        ) {
-          const expDate = new Date(s.resolucionOficina.fechaExpiracionPermiso);
-          if (new Date() < expDate) {
-            return true;
-          }
-        }
-        return false;
+        const parsedRes = parseMotivoTag<any>(s.motivo, 'RESOLUCION_OFICINA_DATA');
+        const tipoRes = parsedRes?.tipoResolucion || parsedRes?.tipo_resolucion || s.resolucionOficina?.tipoResolucion;
+        const expStr =
+          parsedRes?.fechaExpiracionPermiso ||
+          parsedRes?.permiso_temporal_hasta ||
+          s.resolucionOficina?.fechaExpiracionPermiso;
+        return tipoRes === 'permiso_temporal' && Boolean(expStr) && new Date() < new Date(expStr);
       };
 
       // 1. Excluir sanciones apeladas/canceladas/aclaradas del contador global de reincidencia
@@ -2788,20 +2331,5 @@ export const ApiService = {
       },
       forceRefresh
     );
-  },
-
-  /**
-   * Obtiene casetas con caché persistente
-   */
-  async getCasetas(): Promise<any[]> {
-    return apiCache.getOrFetch('casetas_list', TTL_STATIC_CATALOGS, async () => {
-      try {
-        const data = await fetchJson('/casetas');
-        if (Array.isArray(data)) {
-          return data;
-        }
-      } catch { }
-      return [];
-    });
   },
 };

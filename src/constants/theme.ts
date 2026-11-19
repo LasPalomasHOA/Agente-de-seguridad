@@ -59,17 +59,6 @@ export const Colors = {
   },
 } as const;
 
-export const Gradients = {
-  primary: ['#0A192F', '#0F172A'] as const, // Security Dark Navy
-  gold: ['#F59E0B', '#D97706'] as const, // Security Vibrant Gold
-  teal: ['#0D6E5F', '#074239'] as const, // Palomas Teal
-  ocean: ['#0284C7', '#0369A1'] as const,
-  sunset: ['#F59E0B', '#D97706'] as const,
-  coral: ['#EF4444', '#DC2626'] as const,
-  emerald: ['#10B981', '#059669'] as const,
-  purple: ['#8B5CF6', '#6D28D9'] as const,
-};
-
 export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;
 
 export const Fonts = Platform.select({
@@ -106,6 +95,3 @@ export const Spacing = {
   five: 32,
   six: 64,
 } as const;
-
-export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
-export const MaxContentWidth = 800;

@@ -7,7 +7,6 @@ import {
   TextInput,
   ActivityIndicator,
   Animated,
-  Dimensions,
   Modal,
   Platform,
   KeyboardAvoidingView,
@@ -17,12 +16,11 @@ import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMobile } from '../context/MobileContext';
 import { ThemedText } from '@/components/themed-text';
-import { useTheme } from '@/hooks/use-theme';
 import { Spacing } from '@/constants/theme';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { ResortHeader } from '../components/resort-header';
-import { SupabaseService, CorbatinLookupResult } from '../services/supabaseService';
+import { PhotoLightboxModal } from '../components/PhotoLightboxModal';
+import { SupabaseService } from '../services/supabaseService';
 import { getLocalDateStr, getLocalTimeStr } from '../services/apiService';
 import { VehiculoRow, CorbatinRow, EmpresaRow, TrabajadorRow, CatalogoInfraccionRow, SancionDbRow, BitacoraAccesoRow, ReglaReincidenciaRow } from '../types/database';
 import { Evidencia } from '../types/evidencia';
@@ -30,11 +28,11 @@ import { comprimirImagen } from '../services/imageService';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { isNetworkConnected } from '../services/offlineSyncService';
+import { formatHora, formatFecha } from '../utils/dateFormat';
+import { computeStayDuration, evaluarSancionVehiculo, isAccesoFromToday } from '../utils/sanctionEvaluator';
 
 type Mode = 'camera' | 'loading' | 'result' | 'wizard' | 'confirmation';
 type WizardStep = 1 | 2 | 3;
-
-const { width } = Dimensions.get('window');
 
 
 const INFRACTION_CATEGORIES = [
@@ -47,123 +45,10 @@ const INFRACTION_CATEGORIES = [
   { id: 'otros', name: 'Otros', icon: 'create-outline', defaultCode: 'INF-07' },
 ];
 
-const formatHora = (timeStr?: string | null, fallbackIso?: string | null): string | null => {
-  if (!timeStr || typeof timeStr !== 'string') {
-    if (fallbackIso && typeof fallbackIso === 'string') {
-      const ms = parseSqlUtcDate(fallbackIso);
-      const d = new Date(ms);
-      if (!isNaN(d.getTime())) {
-        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-      }
-    }
-    return null;
-  }
-  const clean = timeStr.trim();
-  if (!clean || clean === 'null' || clean === 'undefined') return null;
-
-  // 1. Si contiene fecha completa (ISO con 'T', o timestamp SQL con guiones y dos puntos), parsear siempre como UTC a hora local
-  if (clean.includes('T') || clean.endsWith('Z') || (clean.includes('-') && clean.includes(':'))) {
-    const d = new Date(parseSqlUtcDate(clean));
-    if (!isNaN(d.getTime())) {
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      return `${hh}:${mm}`;
-    }
-  }
-
-  // 2. Si viene únicamente como formato TIME ("06:53:00" o "19:48:00" o "12:48")
-  const match = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (match) {
-    // Si tenemos el timestamp ISO de respaldo (created_at / updated_at), extraer la hora local exacta de ahí
-    if (fallbackIso && typeof fallbackIso === 'string' && (fallbackIso.includes('T') || fallbackIso.includes('-'))) {
-      const d = new Date(parseSqlUtcDate(fallbackIso));
-      if (!isNaN(d.getTime())) {
-        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-      }
-    }
-
-    let hour = parseInt(match[1], 10);
-    const min = match[2];
-    const hasSeconds = match[3] !== undefined;
-
-    // Las columnas TIME de PostgreSQL/Supabase vienen con segundos ("HH:MM:SS") en UTC -> restar 7h (Sonora UTC-7)
-    if (hasSeconds) {
-      hour = (hour - 7 + 24) % 24;
-    }
-
-    return `${String(hour).padStart(2, '0')}:${min}`;
-  }
-
-  return null;
-};
-
-const formatFecha = (dateStr?: string | null): string => {
-  if (!dateStr || typeof dateStr !== 'string') return '';
-  const clean = dateStr.trim();
-  if (!clean || clean === 'null' || clean === 'undefined') return '';
-
-  // Si es un timestamp con hora (UTC), convertir primero a fecha local antes de formatear dd/mm/yyyy
-  if (clean.includes('T') || (clean.includes('-') && clean.includes(':'))) {
-    const d = new Date(parseSqlUtcDate(clean));
-    if (!isNaN(d.getTime())) {
-      const day = String(d.getDate()).padStart(2, '0');
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const year = d.getFullYear();
-      return `${day}/${month}/${year}`;
-    }
-  }
-
-  // Si es únicamente una hora (ej. "05:09 p. m." o "10:09:00") sin separadores de fecha, no devolverla como fecha
-  if (!clean.includes('-') && !clean.includes('/')) {
-    return '';
-  }
-
-  const datePart = clean.includes('T') ? clean.split('T')[0] : (clean.includes(' ') ? clean.split(' ')[0] : clean);
-  const parts = datePart.split('-');
-  if (parts.length === 3) {
-    const [y, m, d] = parts;
-    return `${d}/${m}/${y}`;
-  }
-  return datePart;
-};
-
-export const parseSqlUtcDate = (dateStr?: string | null): number => {
-  if (!dateStr || typeof dateStr !== 'string') return Date.now();
-  let clean = dateStr.trim();
-  if (!clean || clean === 'null' || clean === 'undefined') return Date.now();
-
-  // Si es una fecha pura YYYY-MM-DD sin hora, interpretarla en medianoche local
-  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
-    const [y, m, d] = clean.split('-').map(Number);
-    return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
-  }
-
-  // 1. Si viene con espacio entre fecha y hora (ej: "2026-09-15 12:27:45.272-07" o "2026-09-15 19:27:45"), normalizar espacio a 'T'
-  if (clean.includes(' ') && clean.includes('-')) {
-    clean = clean.replace(' ', 'T');
-  }
-
-  // 2. Si el offset de zona horaria es de 2 dígitos sin minutos (ej: "-07" o "+00" al final), normalizar a "-07:00" o "+00:00"
-  clean = clean.replace(/([+-]\d{2})$/, '$1:00');
-
-  // 3. Si no trae zona horaria explícita (+HH:MM, -HH:MM ni Z), los timestamps de SQL/PostgreSQL representan UTC, por lo que agregamos 'Z'
-  if (!clean.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(clean)) {
-    clean = clean + 'Z';
-  }
-
-  // 4. Intentar parseo estándar con ISO 8601 normalizado
-  const ms = new Date(clean).getTime();
-  if (!isNaN(ms)) {
-    return ms;
-  }
-
-  return Date.now();
-};
 
 export default function ScannerScreen() {
   const params = useLocalSearchParams();
   const router = useRouter();
-  const theme = useTheme();
   const { agregarReporte, catalogoInfracciones, agenteActual, isOnline } = useMobile();
 
   // Navigation / Mode states
@@ -198,7 +83,7 @@ export default function ScannerScreen() {
 
   // Wizard state (3 steps)
   const [step, setStep] = useState<WizardStep>(1);
-  const [selectedCategory, setSelectedCategory] = useState<string>('seguridad');
+  const [selectedCategory, setSelectedCategory] = useState<string>('estacionamiento');
   const [selectedInfraccion, setSelectedInfraccion] = useState<CatalogoInfraccionRow | null>(() => catalogoInfracciones[0] || null);
   const [lugar, setLugar] = useState('');
   const [fecha, setFecha] = useState(() => getLocalDateStr());
@@ -208,7 +93,6 @@ export default function ScannerScreen() {
 
   // Step 2: Photos
   const [evidencias, setEvidencias] = useState<Evidencia[]>([]);
-  const [photoCount, setPhotoCount] = useState(0);
 
   // Step 3: Confirmation
   const [confirmed, setConfirmed] = useState(false);
@@ -247,29 +131,7 @@ export default function ScannerScreen() {
     }
   }, [catalogoInfracciones, selectedInfraccion]);
 
-  const isAccesoToday = React.useMemo(() => {
-    if (!ultimoAcceso) return false;
-    const todayStr = getLocalDateStr(new Date());
-
-    // Priorizar el primer timestamp completo disponible (salida o entrada) convertido a zona horaria local
-    const candidates = [
-      ultimoAcceso.hora_salida,
-      ultimoAcceso.hora_entrada,
-      ultimoAcceso.updated_at,
-      ultimoAcceso.created_at,
-    ];
-    const refTs = candidates.find(
-      (c) => typeof c === 'string' && (c.includes('T') || (c.includes('-') && c.includes(':')))
-    );
-
-    if (refTs) {
-      const eventLocalDate = getLocalDateStr(new Date(parseSqlUtcDate(refTs)));
-      return eventLocalDate === todayStr;
-    }
-
-    const fechaStr = ultimoAcceso.fecha || '';
-    return !!fechaStr && fechaStr.startsWith(todayStr);
-  }, [ultimoAcceso, nowTick]);
+  const isAccesoToday = React.useMemo(() => isAccesoFromToday(ultimoAcceso), [ultimoAcceso, nowTick]);
 
   // Un vehículo permanece dentro del complejo desde que ingresa hasta que el oficial en caseta marque su salida manualmente,
   // sin importar que transcurra la medianoche o pasen días (toda salida debe ser registrada manualmente en caseta).
@@ -281,63 +143,7 @@ export default function ScannerScreen() {
     return hasEntered && hasNotExited;
   }, [ultimoAcceso]);
 
-  const tiempoEstancia = React.useMemo(() => {
-    if (!ultimoAcceso?.hora_entrada) return '';
-
-    // 1. Intentar cálculo real multidiario basado en timestamps absolutos
-    let entryMs: number | null = null;
-    const rawEntry = ultimoAcceso.hora_entrada.trim();
-    if (rawEntry.includes('T') || (rawEntry.includes('-') && rawEntry.includes(':'))) {
-      entryMs = parseSqlUtcDate(rawEntry);
-    } else if (ultimoAcceso.created_at) {
-      entryMs = parseSqlUtcDate(ultimoAcceso.created_at);
-    } else if (ultimoAcceso.fecha && /^\d{4}-\d{2}-\d{2}$/.test(ultimoAcceso.fecha)) {
-      entryMs = parseSqlUtcDate(`${ultimoAcceso.fecha}T${rawEntry}`);
-    }
-
-    if (entryMs && !isNaN(entryMs)) {
-      const diffMs = Date.now() - entryMs;
-      if (diffMs > 0) {
-        const totalMinutes = Math.floor(diffMs / (60 * 1000));
-        if (totalMinutes < 1) return 'Menos de 1 min';
-        const days = Math.floor(totalMinutes / (24 * 60));
-        const remHours = Math.floor((totalMinutes % (24 * 60)) / 60);
-        const mins = totalMinutes % 60;
-
-        if (days > 0) {
-          return `${days}d ${remHours}h ${mins}m`;
-        }
-        if (remHours > 0) {
-          return `${remHours}h ${mins}m`;
-        }
-        return `${mins} min`;
-      }
-    }
-
-    // 2. Fallback de tiempo para horas simples HH:mm
-    const timeVal = formatHora(ultimoAcceso.hora_entrada, ultimoAcceso.created_at);
-    if (!timeVal) return '';
-
-    try {
-      const parts = timeVal.split(':');
-      if (parts.length >= 2) {
-        const entryHour = parseInt(parts[0], 10);
-        const entryMin = parseInt(parts[1], 10);
-        const now = new Date();
-        const currentHour = now.getHours();
-        const currentMin = now.getMinutes();
-
-        let totalMinutes = (currentHour * 60 + currentMin) - (entryHour * 60 + entryMin);
-        if (totalMinutes < 0) totalMinutes += 24 * 60;
-        if (totalMinutes < 1) return 'Menos de 1 min';
-        const hrs = Math.floor(totalMinutes / 60);
-        const mins = totalMinutes % 60;
-        if (hrs > 0) return `${hrs}h ${mins}m`;
-        return `${mins} min`;
-      }
-    } catch { }
-    return '';
-  }, [ultimoAcceso]);
+  const tiempoEstancia = React.useMemo(() => computeStayDuration(ultimoAcceso), [ultimoAcceso]);
 
   const handleMarcarSalida = async () => {
     if (!selectedVehicle) return;
@@ -562,7 +368,6 @@ export default function ScannerScreen() {
     setLugar('');
     setDescripcion('');
     setEvidencias([]);
-    setPhotoCount(0);
     setConfirmed(false);
     setMode('wizard');
   };
@@ -603,7 +408,6 @@ export default function ScannerScreen() {
           descripcion: `Fotografía de evidencia capturada por oficial (${comp.sizeKB} KB).`,
         };
         setEvidencias((prev) => [...prev, newEvidencia]);
-        setPhotoCount((prev) => prev + 1);
       }
     } catch (err: any) {
       console.warn('[Scanner] Error capturando foto con cámara:', err);
@@ -645,7 +449,6 @@ export default function ScannerScreen() {
         }
         if (newItems.length > 0) {
           setEvidencias((prev) => [...prev, ...newItems]);
-          setPhotoCount((prev) => prev + newItems.length);
         }
       }
     } catch (err: any) {
@@ -708,259 +511,17 @@ export default function ScannerScreen() {
     }
   };
 
-  const evaluacionSancion = React.useMemo(() => {
-    const estatusVehiculo = (selectedVehicle?.estatus_acceso || '').toLowerCase();
-    const estatusCorbatin = (selectedCorbatin?.estatus || '').toLowerCase();
-    const ahoraMs = nowTick;
-
-    // Parsea la fecha de inicio real de la sanción sin desplazar al día siguiente sanciones que ya están activas
-    const normalizarInicioSancionMs = (rawInicio?: string | null): number => {
-      const ms = parseSqlUtcDate(rawInicio);
-      const d = new Date(ms);
-      if (isNaN(d.getTime())) return ms;
-      // Solo si venía programada a medianoche exacta (00:00:00) en una fecha futura, ajustar a las 7:00 AM de ese mismo día
-      if (ms > ahoraMs && d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0) {
-        return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 7, 0, 0, 0).getTime();
-      }
-      return ms;
-    };
-
-    const calcularFinMs = (s: SancionDbRow, inicioMs: number, nivelS: number): number | null => {
-      const dbFinMs = s.fecha_fin ? parseSqlUtcDate(s.fecha_fin) : null;
-      const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
-      if (reglaS && reglaS.horas_suspension !== undefined && reglaS.horas_suspension !== null) {
-        const h = Number(reglaS.horas_suspension);
-        if (h === -1) return null;
-        if (h > 0) return inicioMs + h * 60 * 60 * 1000;
-        // Si la regla fue restablecida a 0h pero la sanción en BD ya tenía una fecha_fin de suspensión asignada, respetarla
-        if (h === 0) {
-          return dbFinMs && dbFinMs > inicioMs ? dbFinMs : null;
-        }
-      }
-      if (dbFinMs) {
-        return dbFinMs;
-      }
-      const defHoras = nivelS === 2 ? 24 : (nivelS === 3 ? 168 : (nivelS === 1 ? 0 : -1));
-      return defHoras > 0 ? inicioMs + defHoras * 60 * 60 * 1000 : null;
-    };
-
-    // Filtrar sanciones activas que no hayan expirado
-    const sancionesEnVigor = (sancionesActivas || []).filter((s) => {
-      const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
-      const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
-      const finMs = calcularFinMs(s, inicioMs, nivelS);
-      if (finMs !== null) {
-        return ahoraMs < finMs;
-      }
-      return true;
-    });
-
-    if (
-      estatusCorbatin === 'cancelado' ||
-      estatusCorbatin === 'suspendido' ||
-      estatusVehiculo === 'denegado' ||
-      estatusVehiculo === 'restringido' ||
-      estatusVehiculo === 'bloqueado'
-    ) {
-      return {
-        isBlocked: true,
-        isWarning: false,
-        level: 4,
-        levelTitle: 'ACCESO RESTRINGIDO PERMANENTE',
-        levelBadge: 'LISTA NEGRA',
-        levelName: 'Nivel 4 - Lista Negra Permanente',
-        motivo: selectedCorbatin?.motivo_cancelacion || 'Acceso restringido permanentemente por administración HOA.',
-        timeRemainingText: 'Permanente',
-        fechaFinText: 'Permanente (Requiere Administrador)',
-        requiresAdmin: true,
-        badgeBg: '#991B1B',
-      };
-    }
-
-    if (sancionesEnVigor.length === 0) {
-      // Si el vehículo tiene estatus SUSPENDIDO directamente en la base de datos aunque no tenga sanciones en vigor listadas
-      if (estatusVehiculo === 'suspendido') {
-        return {
-          isBlocked: true,
-          isWarning: false,
-          level: 2,
-          levelTitle: 'SUSPENSIÓN VEHICULAR ACTIVA',
-          levelBadge: 'SUSPENDIDO',
-          levelName: 'Unidad con Estatus Suspendido en Sistema HOA',
-          motivo: 'El vehículo se encuentra registrado con estatus SUSPENDIDO en la base de datos.',
-          timeRemainingText: 'Suspendido',
-          fechaFinText: 'Sujeto a liberación HOA',
-          requiresAdmin: false,
-          badgeBg: '#DC2626',
-        };
-      }
-      return null;
-    }
-
-    // Tomar la sanción en vigor más relevante (mayor nivel de reincidencia y más reciente)
-    const sancion = [...sancionesEnVigor].sort(
-      (a, b) =>
-        (Number(b.numero_reincidencia) || Number(b.id_regla) || 1) -
-          (Number(a.numero_reincidencia) || Number(a.id_regla) || 1) ||
-        Number(b.id_sancion || 0) - Number(a.id_sancion || 0)
-    )[0];
-    const nivel = Math.max(
-      Number(sancion.numero_reincidencia) || 1,
-      Number(sancion.id_regla) || 1
-    );
-    const fechaInicioMs = normalizarInicioSancionMs(sancion.fecha_inicio || (sancion as any).created_at);
-
-    // Buscar regla configurada para este nivel en la matriz oficial del HOA
-    const reglaConfig = (reglasReincidencia || []).find((r) => r.numero_falta === nivel);
-
-    // Calcular fecha_fin efectiva respetando horas de regla o fecha_fin ya impuesta en BD
-    const fechaFinMs = calcularFinMs(sancion, fechaInicioMs, nivel);
-
-    // Determinar horas de suspensión configuradas o efectivas
-    let horasSuspension = reglaConfig?.horas_suspension;
-    if (
-      horasSuspension === undefined ||
-      horasSuspension === null ||
-      (horasSuspension === 0 && fechaFinMs && fechaFinMs > fechaInicioMs)
-    ) {
-      if (fechaFinMs && fechaFinMs > fechaInicioMs) {
-        horasSuspension = Math.max(1, Math.round((fechaFinMs - fechaInicioMs) / (1000 * 60 * 60)));
-      } else {
-        if (nivel === 1) horasSuspension = 0;
-        else if (nivel === 2) horasSuspension = 24;
-        else if (nivel === 3) horasSuspension = 168;
-        else horasSuspension = -1;
-      }
-    }
-
-    const tieneSuspensionTemporalActiva = Boolean(fechaFinMs && ahoraMs < fechaFinMs);
-    const permiteAcceso =
-      estatusVehiculo === 'suspendido' || tieneSuspensionTemporalActiva
-        ? false
-        : reglaConfig !== undefined
-          ? Boolean(reglaConfig.permite_acceso)
-          : (horasSuspension === 0 && !sancion.fecha_fin);
-    const requiresAdmin = Boolean(reglaConfig?.requiere_administrador || horasSuspension === -1 || nivel >= 4);
-
-    // ─── CASO 0: Sanción programada que aún no llega a su fecha de inicio (7:00 AM del día siguiente) ───
-    // NOTA: Si el vehículo en BD ya tiene estatus SUSPENDIDO, la suspensión ya está activa y NO debe mostrarse como programada
-    if (ahoraMs < fechaInicioMs && estatusVehiculo !== 'suspendido') {
-      const inicioDate = new Date(fechaInicioMs);
-      const inicioLabel = inicioDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' });
-      return {
-        isBlocked: false,
-        isWarning: true,
-        level: nivel,
-        levelTitle: `${nivel}ª Falta Programada (Inicia 7:00 AM)`,
-        levelBadge: `INICIA ${inicioLabel}`,
-        levelName: `${nivel}ª Falta - Entra en vigor el ${inicioLabel} a las 7:00 AM`,
-        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || `Sanción programada para iniciar el ${inicioLabel} a las 7:00 AM.`,
-        timeRemainingText: `Inicia ${inicioLabel} 7:00 AM`,
-        fechaFinText: fechaFinMs
-          ? `Hasta ${new Date(fechaFinMs).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${new Date(fechaFinMs).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`
-          : 'Acceso Permitido Hasta 7:00 AM',
-        requiresAdmin: false,
-        badgeBg: '#D97706',
-      };
-    }
-
-    // ─── CASO 1: Bloqueo Permanente / Lista Negra ───
-    if (horasSuspension === -1 || (requiresAdmin && !fechaFinMs)) {
-      return {
-        isBlocked: true,
-        isWarning: false,
-        level: Math.max(nivel, 4),
-        levelTitle: 'ACCESO RESTRINGIDO PERMANENTE',
-        levelBadge: 'LISTA NEGRA',
-        levelName: `Nivel ${nivel} - Bloqueo Permanente`,
-        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Acceso vehicular restringido permanentemente por reincidencia.',
-        timeRemainingText: 'Permanente',
-        fechaFinText: 'Indefinido (Requiere Comité HOA)',
-        requiresAdmin: true,
-        badgeBg: '#991B1B',
-      };
-    }
-
-    // ─── CASO 2: Suspensión Temporal Activa (Horas configuradas o fecha_fin vigentes) ───
-    if (fechaFinMs && ahoraMs < fechaFinMs) {
-      const refStartMs = Math.min(ahoraMs, fechaInicioMs);
-      const diffMs = Math.max(0, fechaFinMs - ahoraMs);
-      const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-      const totalHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-      const totalMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-
-      const timeRemainingText =
-        totalDays > 0
-          ? `${totalDays}d ${totalHours}h restantes`
-          : totalHours > 0
-            ? `${totalHours}h ${totalMinutes}m restantes`
-            : `${totalMinutes}m restantes`;
-
-      const duracionTotalHoras = Math.max(1, Math.round((fechaFinMs - refStartMs) / (1000 * 60 * 60)));
-      const titleText =
-        duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
-          ? `SUSPENSIÓN TEMPORAL (${duracionTotalHoras / 24} ${duracionTotalHoras / 24 === 1 ? 'DÍA' : 'DÍAS'})`
-          : `SUSPENSIÓN TEMPORAL (${duracionTotalHoras} HORAS)`;
-      const badgeText =
-        duracionTotalHoras >= 24 && duracionTotalHoras % 24 === 0
-          ? `SUSPENSIÓN ${duracionTotalHoras / 24}D`
-          : `SUSPENSIÓN ${duracionTotalHoras}H`;
-
-      const finDate = new Date(fechaFinMs);
-      const fechaFinText = `${finDate.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${finDate.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
-
-      return {
-        isBlocked: true,
-        isWarning: false,
-        level: nivel,
-        levelTitle: titleText,
-        levelBadge: badgeText,
-        levelName: `${nivel}ª Falta - Suspensión Temporal (${duracionTotalHoras}h)`,
-        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || `Falta nivel ${nivel}: suspensión vehicular reglamentaria por ${duracionTotalHoras} horas.`,
-        timeRemainingText,
-        fechaFinText,
-        requiresAdmin,
-        badgeBg: nivel >= 3 ? '#DC2626' : (nivel === 2 ? '#EA580C' : '#D97706'),
-      };
-    }
-
-    // ─── CASO 3: Si ya expiró la suspensión temporal ───
-    if (fechaFinMs && ahoraMs >= fechaFinMs) {
-      return null; // Expirada automáticamente
-    }
-
-    // ─── CASO 4: Llamado de atención informativo (Sin suspensión, acceso permitido, y el vehículo NO está suspendido en BD) ───
-    if (permiteAcceso && (horasSuspension === 0 || !horasSuspension) && estatusVehiculo !== 'suspendido') {
-      return {
-        isBlocked: false,
-        isWarning: true,
-        level: nivel,
-        levelTitle: `${nivel}ª Falta: Llamado de Atención`,
-        levelBadge: `${nivel}ª FALTA`,
-        levelName: `${nivel}ª Falta - Llamado de Atención`,
-        motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Llamado de atención formal registrado en el sistema. Acceso permitido.',
-        timeRemainingText: 'Informativo',
-        fechaFinText: 'Acceso Permitido',
-        requiresAdmin: false,
-        badgeBg: '#F59E0B',
-      };
-    }
-
-    // Por defecto (si el vehículo está SUSPENDIDO en BD o la regla no permite acceso)
-    return {
-      isBlocked: true,
-      isWarning: false,
-      level: nivel,
-      levelTitle: 'SUSPENSIÓN VEHICULAR ACTIVA',
-      levelBadge: 'SUSPENDIDO',
-      levelName: `${nivel}ª Falta - Acceso Vehicular Suspendido`,
-      motivo: sancion.motivo || reglaConfig?.mensaje_alerta || 'Acceso vehicular suspendido por normativa HOA.',
-      timeRemainingText: 'Suspendido',
-      fechaFinText: 'Acceso Restringido',
-      requiresAdmin,
-      badgeBg: '#DC2626',
-    };
-  }, [selectedVehicle, selectedCorbatin, sancionesActivas, nowTick, reglasReincidencia]);
+  const evaluacionSancion = React.useMemo(
+    () =>
+      evaluarSancionVehiculo({
+        selectedVehicle,
+        selectedCorbatin,
+        sancionesActivas,
+        reglasReincidencia,
+        ahoraMs: nowTick,
+      }),
+    [selectedVehicle, selectedCorbatin, sancionesActivas, nowTick, reglasReincidencia]
+  );
 
   const isSuspended = !!evaluacionSancion?.isBlocked;
   const hasWarningLevel1 = !!evaluacionSancion?.isWarning;
@@ -2117,61 +1678,14 @@ export default function ScannerScreen() {
       )}
 
       {/* ─── LIGHTBOX MODAL FOR ZOOMING VEHICLE / EVIDENCE PHOTOS ─── */}
-      {lightboxPhoto && (
-        <Modal
-          visible={!!lightboxPhoto}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setLightboxPhoto(null)}
-        >
-          <View style={styles.lightboxOverlay}>
-            <View style={styles.lightboxCard}>
-              <View style={styles.lightboxHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                  <View style={styles.lightboxIconBadge}>
-                    <Ionicons name="camera" size={18} color="#0D6E5F" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <ThemedText style={styles.lightboxTitle}>Inspección Fotográfica</ThemedText>
-                    <ThemedText style={styles.lightboxSubTitle} numberOfLines={1}>
-                      {selectedCorbatin?.numero ? `Corbatín #${selectedCorbatin.numero} • ` : ''}
-                      {selectedVehicle?.placas || 'Registro HOA'}
-                    </ThemedText>
-                  </View>
-                </View>
-                <Pressable onPress={() => setLightboxPhoto(null)} style={styles.lightboxCloseBtn}>
-                  <Ionicons name="close" size={20} color="#475569" />
-                </Pressable>
-              </View>
-
-              <View style={styles.lightboxStageBox}>
-                <Image
-                  source={{ uri: lightboxPhoto }}
-                  style={styles.lightboxImg}
-                  contentFit="contain"
-                  cachePolicy="memory-disk"
-                />
-              </View>
-
-              <View style={styles.lightboxFooter}>
-                <ThemedText style={styles.lightboxPlate}>
-                  Placas: {selectedVehicle?.placas || 'N/A'} &bull; {selectedVehicle?.marca} {selectedVehicle?.modelo}
-                </ThemedText>
-                <ThemedText style={styles.lightboxCompany}>
-                  {selectedEmpresa?.razon_social || 'Empresa Acreditada HOA'}
-                </ThemedText>
-              </View>
-
-              <Pressable
-                onPress={() => setLightboxPhoto(null)}
-                style={styles.lightboxPrimaryCloseBtn}
-              >
-                <ThemedText style={styles.lightboxPrimaryCloseText}>Cerrar Vista</ThemedText>
-              </Pressable>
-            </View>
-          </View>
-        </Modal>
-      )}
+      <PhotoLightboxModal
+        visible={!!lightboxPhoto}
+        uri={lightboxPhoto}
+        subtitle={`${selectedCorbatin?.numero ? `Corbatín #${selectedCorbatin.numero} • ` : ''}${selectedVehicle?.placas || 'Registro HOA'}`}
+        footerTitle={`Placas: ${selectedVehicle?.placas || 'N/A'} • ${selectedVehicle?.marca} ${selectedVehicle?.modelo}`}
+        footerSubtitle={selectedEmpresa?.razon_social || 'Empresa Acreditada HOA'}
+        onClose={() => setLightboxPhoto(null)}
+      />
 
       {/* ─── MODAL DE CONFIRMACIÓN DE SALIDA EXITOSA ─── */}
       {exitSuccessModal && (
@@ -2337,52 +1851,6 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 40,
     gap: 12,
-  },
-  miniResortHeader: {
-    position: 'relative',
-    height: 78,
-    borderRadius: 16,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 4,
-    marginBottom: 4,
-  },
-  miniResortHeaderBg: {
-    width: '100%',
-    height: '100%',
-    position: 'absolute',
-  },
-  miniResortHeaderContent: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    gap: 12,
-  },
-  miniResortIconBox: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255, 255, 255, 0.18)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.25)',
-  },
-  miniResortTitle: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: '#ffffff',
-    letterSpacing: -0.2,
-  },
-  miniResortSubtitle: {
-    fontSize: 11,
-    color: 'rgba(255, 255, 255, 0.85)',
-    fontWeight: '500',
-    marginTop: 1,
   },
   miniResortTagBadge: {
     backgroundColor: 'rgba(0, 0, 0, 0.25)',
@@ -2705,64 +2173,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
-  accessDeniedBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FEF2F2',
-    borderWidth: 1.5,
-    borderColor: '#EF4444',
-    paddingVertical: 10,
-    borderRadius: 12,
-  },
-  accessDeniedBannerText: {
-    color: '#EF4444',
-    fontSize: 14,
-    fontWeight: '900',
-    letterSpacing: 0.5,
-  },
-  statusPillRow: {
-    flexDirection: 'row',
-  },
-  habilitadoPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1,
-    borderColor: '#10B981',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  habilitadoPillText: {
-    color: '#059669',
-    fontSize: 11,
-    fontWeight: '900',
-  },
-  suspendedPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEF2F2',
-    borderWidth: 1,
-    borderColor: '#EF4444',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  suspendedPillText: {
-    color: '#DC2626',
-    fontSize: 11,
-    fontWeight: '900',
-  },
-  vehicleDataCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1.5,
-    borderColor: '#e2e8f0',
-    borderLeftWidth: 6,
-    gap: 12,
-  },
   vehicleDataCardTitle: {
     fontSize: 14,
     fontWeight: '900',
@@ -2788,35 +2198,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0f172a',
   },
-  vehicleThumbWrap: {
-    borderRadius: 14,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    height: 120,
-  },
-  vehiclePhotoImg: {
-    width: '100%',
-    height: '100%',
-  },
-  reportYellowBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#0D6E5F',
-    height: 48,
-    borderRadius: 12,
-    shadowColor: '#0D6E5F',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  reportYellowBtnText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '900',
-  },
   historyCard: {
     backgroundColor: '#ffffff',
     borderRadius: 14,
@@ -2829,15 +2210,6 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     fontWeight: '800',
     color: '#0f172a',
-  },
-  historyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  historyRowText: {
-    fontSize: 12,
-    color: '#475569',
-    fontWeight: '500',
   },
   contextActiveBanner: {
     backgroundColor: '#FEF3C7',
@@ -3540,137 +2912,6 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.6,
   },
-  subHeaderBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  volverBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  volverBtnText: {
-    fontSize: 11.5,
-    fontWeight: '800',
-    color: '#0f172a',
-  },
-  timeBadgeChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    gap: 5,
-  },
-  timeBadgeChipText: {
-    fontSize: 11.5,
-    color: '#475569',
-    fontWeight: '700',
-  },
-  suspendedVehicleCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1.5,
-    borderColor: '#E2E8F0',
-    flexDirection: 'row',
-    gap: 14,
-    flexWrap: 'wrap',
-    shadowColor: '#0f172a',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  suspendedPhotoCol: {
-    width: 140,
-    height: 110,
-    borderRadius: 12,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  suspendedPhotoImg: {
-    width: '100%',
-    height: '100%',
-  },
-  plateTagOverlay: {
-    position: 'absolute',
-    bottom: 4,
-    left: 4,
-    backgroundColor: 'rgba(15, 23, 42, 0.85)',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  plateTagOverlayText: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '900',
-  },
-  suspendedMetaCol: {
-    flex: 1,
-    minWidth: 200,
-    gap: 6,
-  },
-  suspendedVehicleTitle: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: '#0f172a',
-  },
-  suspendedRedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEF2F2',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-    gap: 4,
-  },
-  dotRed: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#DC2626',
-  },
-  suspendedRedBadgeText: {
-    color: '#DC2626',
-    fontSize: 10,
-    fontWeight: '900',
-  },
-  suspendedCompanyText: {
-    fontSize: 12.5,
-    color: '#64748B',
-    fontWeight: '600',
-  },
-  suspendedMiniGrid: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 4,
-  },
-  suspendedMiniBox: {
-    flex: 1,
-    minWidth: 110,
-    backgroundColor: '#F8FAFC',
-    padding: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  dataValueSmall: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#0f172a',
-    marginTop: 2,
-  },
   suspensionDetailCard: {
     backgroundColor: '#ffffff',
     borderRadius: 16,
@@ -3805,112 +3046,6 @@ const styles = StyleSheet.create({
     fontSize: 13.5,
     fontWeight: '900',
     letterSpacing: 0.3,
-  },
-  lightboxOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.72)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 16,
-  },
-  lightboxCard: {
-    width: '100%',
-    maxWidth: 480,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    gap: 12,
-    padding: 18,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.25,
-    shadowRadius: 20,
-    elevation: 10,
-  },
-  lightboxHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E2E8F0',
-    paddingBottom: 10,
-  },
-  lightboxIconBadge: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  lightboxTitle: {
-    fontSize: 15.5,
-    fontWeight: '900',
-    color: '#0F172A',
-  },
-  lightboxSubTitle: {
-    fontSize: 11.5,
-    color: '#64748B',
-    fontWeight: '600',
-    marginTop: 1,
-  },
-  lightboxCloseBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  lightboxStageBox: {
-    width: '100%',
-    height: 340,
-    backgroundColor: '#0F172A',
-    borderRadius: 14,
-    overflow: 'hidden',
-    borderWidth: 1.5,
-    borderColor: '#E2E8F0',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  lightboxImg: {
-    width: '100%',
-    height: '100%',
-  },
-  lightboxFooter: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    gap: 2,
-  },
-  lightboxPlate: {
-    fontSize: 12.5,
-    fontWeight: '900',
-    color: '#0D6E5F',
-  },
-  lightboxCompany: {
-    fontSize: 11,
-    color: '#64748B',
-    fontWeight: '600',
-  },
-  lightboxPrimaryCloseBtn: {
-    backgroundColor: '#0D6E5F',
-    height: 44,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  lightboxPrimaryCloseText: {
-    color: '#FFFFFF',
-    fontSize: 13.5,
-    fontWeight: '800',
   },
   historyCardInsideHighlight: {
     borderColor: '#0D6E5F',

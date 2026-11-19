@@ -96,20 +96,22 @@ export async function isNetworkConnected(): Promise<boolean> {
   }
 }
 
-/**
- * Obtiene los reportes que fueron generados offline y están pendientes de subida
- */
-export async function getPendingReports(): Promise<PendingReportPayload[]> {
+async function readAsyncArray<T>(key: string): Promise<T[]> {
   try {
-    const raw = await AsyncStorage.getItem(PENDING_REPORTS_KEY);
+    const raw = await AsyncStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.warn('[OfflineSync] Error leyendo cola de pendientes:', err);
+  } catch {
     return [];
   }
 }
+
+/**
+ * Obtiene los reportes que fueron generados offline y están pendientes de subida
+ */
+export const getPendingReports = (): Promise<PendingReportPayload[]> =>
+  readAsyncArray<PendingReportPayload>(PENDING_REPORTS_KEY);
 
 /**
  * Guarda un nuevo reporte en la cola de pendientes offline en disco
@@ -153,31 +155,14 @@ export async function saveCachedReports(reportes: ReporteInfraccion[]): Promise<
 /**
  * Lee la lista completa en caché para cuando no hay internet al abrir la app
  */
-export async function getCachedReports(): Promise<ReporteInfraccion[]> {
-  try {
-    const raw = await AsyncStorage.getItem(CACHED_REPORTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
+export const getCachedReports = (): Promise<ReporteInfraccion[]> =>
+  readAsyncArray<ReporteInfraccion>(CACHED_REPORTS_KEY);
 
 /**
  * Obtiene los borradores guardados localmente en el dispositivo
  */
-export async function getDraftReports(): Promise<DraftReportPayload[]> {
-  try {
-    const raw = await AsyncStorage.getItem(DRAFT_REPORTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.warn('[OfflineSync] Error leyendo borradores locales:', err);
-    return [];
-  }
-}
+export const getDraftReports = (): Promise<DraftReportPayload[]> =>
+  readAsyncArray<DraftReportPayload>(DRAFT_REPORTS_KEY);
 
 /**
  * Guarda un borrador de reporte localmente en disco (sin enviarlo al servidor)
@@ -367,7 +352,6 @@ export function setupNetworkRestorationListener(onConnectionRestored: () => void
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const OFFLINE_VEHICLES_CATALOG_KEY = 'hoa_offline_vehicles_catalog';
-export const OFFLINE_CATALOG_META_KEY = 'hoa_offline_catalog_meta';
 
 export interface OfflineVehicleRecord {
   id_vehiculo: number;

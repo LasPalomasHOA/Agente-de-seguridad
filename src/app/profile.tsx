@@ -8,6 +8,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { Spacing } from '@/constants/theme';
 import { Ionicons } from '@expo/vector-icons';
 import { CatalogoInfraccionRow } from '../types/database';
+import { filterOfficerReports, getOfficerReportCounts } from '../utils/reportHelpers';
 
 export default function ProfileScreen() {
   const { agenteActual, reportes, catalogoInfracciones, logout, themeMode, toggleTheme } = useMobile();
@@ -20,9 +21,8 @@ export default function ProfileScreen() {
   const infracciones = catalogoInfracciones;
 
   // Stats calculation
-  const misReportes = useMemo(() => (reportes || []).filter((r: any) => r.agenteId === agenteActual?.id), [reportes, agenteActual?.id]);
-  const pendientes = useMemo(() => misReportes.filter((r: any) => r.estado === 'pendiente' || r.estado === 'informacion_solicitada').length, [misReportes]);
-  const aprobados = useMemo(() => misReportes.filter((r: any) => r.estado === 'aprobado').length, [misReportes]);
+  const misReportes = useMemo(() => filterOfficerReports(reportes, agenteActual?.id), [reportes, agenteActual?.id]);
+  const { pendientes, aprobados } = useMemo(() => getOfficerReportCounts(misReportes), [misReportes]);
 
   const isTablet = width >= 600;
 

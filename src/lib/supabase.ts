@@ -1,15 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { Database } from '../types/database';
 
 // Supabase project credentials for Las Palomas HOA
-export const SUPABASE_URL =
+const SUPABASE_URL =
   process.env.EXPO_PUBLIC_SUPABASE_URL || 'https://iocpmwzyvkangytybcwh.supabase.co';
 
-export const SUPABASE_ANON_KEY =
+const SUPABASE_ANON_KEY =
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'TU_ANON_KEY_AQUI';
-
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Storage adapter safe across Web, iOS, Android
 const customStorage = {
@@ -40,9 +39,6 @@ const customStorage = {
     } catch { }
   },
 };
-
-export const SUPABASE_SCHEMA =
-  process.env.EXPO_PUBLIC_SUPABASE_SCHEMA || 'control_acceso';
 
 export const isSupabaseConfigured = (): boolean => {
   return (
@@ -81,28 +77,4 @@ export const PROJECTIONS = {
   BITACORA_LIGHT: 'id_acceso, id_caseta, id_vehiculo, id_corbatin, id_conductor, id_usuario, fecha, hora_entrada, hora_salida, estatus_acceso, created_at, updated_at',
   REPORTES_COUNT_ONLY: 'id_reporte',
 } as const;
-
-/**
- * Helper optimizado para contar registros sin descargar el payload (Egress = 0 bytes de body)
- */
-export async function getCountOptimized(
-  table: string,
-  filterColumn?: string,
-  filterValue?: string | number
-): Promise<number> {
-  try {
-    let query = (supabase as any)
-      .from(table)
-      .select('*', { count: 'exact', head: true });
-
-    if (filterColumn && filterValue !== undefined) {
-      query = query.eq(filterColumn, filterValue);
-    }
-
-    const { count, error } = await query;
-    return error ? 0 : (count ?? 0);
-  } catch {
-    return 0;
-  }
-}
 
