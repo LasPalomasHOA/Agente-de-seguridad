@@ -147,6 +147,27 @@ export function evaluarSancionVehiculo(params: {
     return finMs !== null ? ahoraMs < finMs : true;
   });
 
+  const hasExpiredTimedSanction = (sancionesActivas || []).some((s) => {
+    const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
+    const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
+    const finMs = calcularFinMs(s, inicioMs, nivelS);
+    return finMs !== null && ahoraMs >= finMs;
+  });
+
+  const hasActiveBlockingSanction = sancionesEnVigor.some((s) => {
+    const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
+    const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
+    const finMs = calcularFinMs(s, inicioMs, nivelS);
+    const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
+    const h = reglaS?.horas_suspension ?? defaultHorasByNivel(nivelS);
+    return h === -1 || Boolean(reglaS?.requiere_administrador) || Boolean(finMs && ahoraMs < finMs);
+  });
+
+  const effectiveEstatusVehiculo =
+    estatusVehiculo === 'suspendido' && hasExpiredTimedSanction && !hasActiveBlockingSanction
+      ? 'permitido'
+      : estatusVehiculo;
+
   if (
     estatusCorbatin === 'cancelado' ||
     estatusCorbatin === 'suspendido' ||
@@ -170,7 +191,7 @@ export function evaluarSancionVehiculo(params: {
   }
 
   if (sancionesEnVigor.length === 0) {
-    if (estatusVehiculo === 'suspendido') {
+    if (effectiveEstatusVehiculo === 'suspendido') {
       return {
         isBlocked: true,
         isWarning: false,
@@ -214,14 +235,14 @@ export function evaluarSancionVehiculo(params: {
 
   const tieneSuspensionTemporalActiva = Boolean(fechaFinMs && ahoraMs < fechaFinMs);
   const permiteAcceso =
-    estatusVehiculo === 'suspendido' || tieneSuspensionTemporalActiva
+    effectiveEstatusVehiculo === 'suspendido' || tieneSuspensionTemporalActiva
       ? false
       : reglaConfig !== undefined
         ? Boolean(reglaConfig.permite_acceso)
         : horasSuspension === 0 && !sancion.fecha_fin;
   const requiresAdmin = Boolean(reglaConfig?.requiere_administrador || horasSuspension === -1 || nivel >= 4);
 
-  if (ahoraMs < fechaInicioMs && estatusVehiculo !== 'suspendido') {
+  if (ahoraMs < fechaInicioMs && effectiveEstatusVehiculo !== 'suspendido') {
     const inicioLabel = formatLocalDate(fechaInicioMs);
     const inicioHoraLabel = formatLocalDateTime(fechaInicioMs);
     return {
@@ -294,7 +315,7 @@ export function evaluarSancionVehiculo(params: {
     };
   }
 
-  if (permiteAcceso && (horasSuspension === 0 || !horasSuspension) && estatusVehiculo !== 'suspendido') {
+  if (permiteAcceso && (horasSuspension === 0 || !horasSuspension) && effectiveEstatusVehiculo !== 'suspendido') {
     return {
       isBlocked: false,
       isWarning: true,

@@ -550,6 +550,40 @@ const normalizeSancionesActivas = (sanciones: any[]): SancionDbRow[] =>
       updated_at: s.updated_at || new Date().toISOString(),
     }));
 
+const syncExpiredVehicleStatus = (
+  vehiculo: VehiculoRow | null | undefined,
+  sancionesActivas: SancionDbRow[]
+): void => {
+  if (!vehiculo?.id_vehiculo || String(vehiculo.estatus_acceso || '').toLowerCase() !== 'suspendido') {
+    return;
+  }
+  const nowMs = Date.now();
+  const hasExpiredTimed = (sancionesActivas || []).some((s) => {
+    if (!s.fecha_fin) return false;
+    const finMs = parseSqlUtcDate(s.fecha_fin);
+    return !isNaN(finMs) && nowMs >= finMs;
+  });
+  const hasActiveBlock = (sancionesActivas || []).some((s) => {
+    const nivel = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
+    if (nivel >= 4) return true;
+    if (!s.fecha_fin) return false;
+    const finMs = parseSqlUtcDate(s.fecha_fin);
+    return !isNaN(finMs) && nowMs < finMs;
+  });
+
+  if (hasExpiredTimed && !hasActiveBlock) {
+    vehiculo.estatus_acceso = 'permitido';
+    if (isSupabaseConfigured()) {
+      (supabase as any)
+        .from('vehiculos')
+        .update({ estatus_acceso: 'PERMITIDO' })
+        .eq('id_vehiculo', vehiculo.id_vehiculo)
+        .then(() => { })
+        .catch(() => { });
+    }
+  }
+};
+
 const parseMotivoTag = <T = any>(motivo: string | undefined | null, tag: string): T | null => {
   if (!motivo) return null;
   const openTag = `[${tag}]`;
@@ -823,6 +857,7 @@ export const ApiService = {
             if (Array.isArray(liveSanciones)) {
               cachedResult.sancionesActivas = normalizeSancionesActivas(liveSanciones);
             }
+            syncExpiredVehicleStatus(cachedResult.vehiculo, cachedResult.sancionesActivas || []);
           } catch { }
 
           return cachedResult;
@@ -1111,6 +1146,7 @@ export const ApiService = {
       ]);
 
       const sancionesActivas = normalizeSancionesActivas(todasSanciones || []);
+      syncExpiredVehicleStatus(vehiculoRow, sancionesActivas);
 
       const result: CorbatinLookupResult = {
         corbatin: corbatinRow,
