@@ -220,7 +220,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setReportes(combined);
         await saveCachedReports(combined);
         return;
-      } else if (draftReportObjects.length > 0 || pendingReportObjects.length > 0) {
+      } else if (Array.isArray(dbReportes) || draftReportObjects.length > 0 || pendingReportObjects.length > 0) {
         const localOnly = [...draftReportObjects, ...pendingReportObjects];
         setReportes(localOnly);
         await saveCachedReports(localOnly);
@@ -459,6 +459,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     safeStorage.removeItem('hoa_mobile_agente');
     safeStorage.removeItem('hoa_mobile_reportes');
     safeStorage.removeItem('hoa_mobile_token');
+    saveCachedReports([]);
     setIsAuthenticated(false);
     setAgenteActual(DEFAULT_AGENTE);
     setReportes([]);
