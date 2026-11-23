@@ -552,26 +552,36 @@ const normalizeSancionesActivas = (sanciones: any[]): SancionDbRow[] =>
 
 const syncExpiredVehicleStatus = (
   vehiculo: VehiculoRow | null | undefined,
-  sancionesActivas: SancionDbRow[]
+  sancionesActivas: SancionDbRow[],
+  reglasReincidencia: ReglaReincidenciaRow[] = []
 ): void => {
-  if (!vehiculo?.id_vehiculo || String(vehiculo.estatus_acceso || '').toLowerCase() !== 'suspendido') {
+  if (
+    !vehiculo?.id_vehiculo ||
+    String(vehiculo.estatus_acceso || '').toLowerCase() !== 'suspendido' ||
+    !sancionesActivas ||
+    sancionesActivas.length === 0
+  ) {
     return;
   }
   const nowMs = Date.now();
-  const hasExpiredTimed = (sancionesActivas || []).some((s) => {
-    if (!s.fecha_fin) return false;
-    const finMs = parseSqlUtcDate(s.fecha_fin);
-    return !isNaN(finMs) && nowMs >= finMs;
-  });
-  const hasActiveBlock = (sancionesActivas || []).some((s) => {
+  const hasActiveBlock = sancionesActivas.some((s) => {
     const nivel = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
-    if (nivel >= 4) return true;
-    if (!s.fecha_fin) return false;
-    const finMs = parseSqlUtcDate(s.fecha_fin);
-    return !isNaN(finMs) && nowMs < finMs;
+    const regla = reglasReincidencia.find((r) => r.numero_falta === nivel);
+    const h = regla?.horas_suspension ?? defaultHorasSuspension(nivel);
+    if (h === -1 || Boolean(regla?.requiere_administrador)) return true;
+    if (regla !== undefined && !regla.permite_acceso) return true;
+    if (s.fecha_fin) {
+      const finMs = parseSqlUtcDate(s.fecha_fin);
+      return !isNaN(finMs) && nowMs < finMs;
+    }
+    if (h > 0) {
+      const inicioMs = parseSqlUtcDate(s.fecha_inicio || (s as any).created_at);
+      return nowMs < inicioMs + h * 60 * 60 * 1000;
+    }
+    return false;
   });
 
-  if (hasExpiredTimed && !hasActiveBlock) {
+  if (!hasActiveBlock) {
     vehiculo.estatus_acceso = 'permitido';
     if (isSupabaseConfigured()) {
       (supabase as any)
@@ -832,7 +842,7 @@ export const ApiService = {
                     .catch(() => null)
                 : Promise.resolve(null);
 
-            const [liveAcceso, liveSanciones, liveEstatusAcceso] = await Promise.all([
+            const [liveAcceso, liveSanciones, liveEstatusAcceso, liveReglas] = await Promise.all([
               cachedResult.vehiculo?.id_vehiculo
                 ? this.getUltimoAcceso(
                   cachedResult.vehiculo.id_vehiculo,
@@ -844,6 +854,7 @@ export const ApiService = {
                 ? this.getSanciones({ idVehiculo: cachedResult.vehiculo.id_vehiculo, forceRefresh: true }).catch(() => [])
                 : Promise.resolve([]),
               liveVehStatusPromise,
+              this.getReglasReincidencia().catch(() => []),
             ]);
 
             if (liveEstatusAcceso && cachedResult.vehiculo) {
@@ -857,7 +868,7 @@ export const ApiService = {
             if (Array.isArray(liveSanciones)) {
               cachedResult.sancionesActivas = normalizeSancionesActivas(liveSanciones);
             }
-            syncExpiredVehicleStatus(cachedResult.vehiculo, cachedResult.sancionesActivas || []);
+            syncExpiredVehicleStatus(cachedResult.vehiculo, cachedResult.sancionesActivas || [], liveReglas);
           } catch { }
 
           return cachedResult;
@@ -1145,8 +1156,11 @@ export const ApiService = {
         hasVehicle ? this.getUltimoAcceso(vehiculoRow.id_vehiculo, corbatinRow.id_corbatin, false) : Promise.resolve(null),
       ]);
 
+      const [reglasActuales] = await Promise.all([
+        this.getReglasReincidencia().catch(() => []),
+      ]);
       const sancionesActivas = normalizeSancionesActivas(todasSanciones || []);
-      syncExpiredVehicleStatus(vehiculoRow, sancionesActivas);
+      syncExpiredVehicleStatus(vehiculoRow, sancionesActivas, reglasActuales);
 
       const result: CorbatinLookupResult = {
         corbatin: corbatinRow,

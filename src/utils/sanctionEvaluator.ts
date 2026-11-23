@@ -147,24 +147,22 @@ export function evaluarSancionVehiculo(params: {
     return finMs !== null ? ahoraMs < finMs : true;
   });
 
-  const hasExpiredTimedSanction = (sancionesActivas || []).some((s) => {
-    const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
-    const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
-    const finMs = calcularFinMs(s, inicioMs, nivelS);
-    return finMs !== null && ahoraMs >= finMs;
-  });
-
   const hasActiveBlockingSanction = sancionesEnVigor.some((s) => {
     const nivelS = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
     const inicioMs = normalizarInicioSancionMs(s.fecha_inicio || (s as any).created_at);
     const finMs = calcularFinMs(s, inicioMs, nivelS);
     const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
     const h = reglaS?.horas_suspension ?? defaultHorasByNivel(nivelS);
-    return h === -1 || Boolean(reglaS?.requiere_administrador) || Boolean(finMs && ahoraMs < finMs);
+    return (
+      h === -1 ||
+      Boolean(reglaS?.requiere_administrador) ||
+      Boolean(finMs && ahoraMs < finMs) ||
+      (reglaS !== undefined && !reglaS.permite_acceso)
+    );
   });
 
   const effectiveEstatusVehiculo =
-    estatusVehiculo === 'suspendido' && hasExpiredTimedSanction && !hasActiveBlockingSanction
+    estatusVehiculo === 'suspendido' && (sancionesActivas || []).length > 0 && !hasActiveBlockingSanction
       ? 'permitido'
       : estatusVehiculo;
 
