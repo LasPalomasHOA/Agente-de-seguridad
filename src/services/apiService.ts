@@ -568,7 +568,7 @@ const syncExpiredVehicleStatus = (
     const nivel = Number(s.numero_reincidencia) || Number(s.id_regla) || 1;
     const regla = reglasReincidencia.find((r) => r.numero_falta === nivel);
     const h = regla?.horas_suspension ?? defaultHorasSuspension(nivel);
-    if (h === -1 || Boolean(regla?.requiere_administrador)) return true;
+    if (h === -1 || nivel >= 4 || (Boolean(regla?.requiere_administrador) && !regla?.permite_acceso)) return true;
     if (regla !== undefined && !regla.permite_acceso) return true;
     if (s.fecha_fin) {
       const finMs = parseSqlUtcDate(s.fecha_fin);

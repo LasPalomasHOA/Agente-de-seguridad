@@ -153,9 +153,9 @@ export function evaluarSancionVehiculo(params: {
     const finMs = calcularFinMs(s, inicioMs, nivelS);
     const reglaS = (reglasReincidencia || []).find((r) => r.numero_falta === nivelS);
     const h = reglaS?.horas_suspension ?? defaultHorasByNivel(nivelS);
+    const isPerm = h === -1 || nivelS >= 4 || (Boolean(reglaS?.requiere_administrador) && !reglaS?.permite_acceso);
     return (
-      h === -1 ||
-      Boolean(reglaS?.requiere_administrador) ||
+      isPerm ||
       Boolean(finMs && ahoraMs < finMs) ||
       (reglaS !== undefined && !reglaS.permite_acceso)
     );
@@ -238,7 +238,11 @@ export function evaluarSancionVehiculo(params: {
       : reglaConfig !== undefined
         ? Boolean(reglaConfig.permite_acceso)
         : horasSuspension === 0 && !sancion.fecha_fin;
-  const requiresAdmin = Boolean(reglaConfig?.requiere_administrador || horasSuspension === -1 || nivel >= 4);
+  const requiresAdmin = Boolean(
+    horasSuspension === -1 ||
+      nivel >= 4 ||
+      (reglaConfig?.requiere_administrador && !reglaConfig?.permite_acceso)
+  );
 
   if (ahoraMs < fechaInicioMs && effectiveEstatusVehiculo !== 'suspendido') {
     const inicioLabel = formatLocalDate(fechaInicioMs);
