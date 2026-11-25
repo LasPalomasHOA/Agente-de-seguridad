@@ -196,6 +196,29 @@ export async function getVehiculoFoto(idVehiculo: number | string): Promise<stri
 // Caché de ETags HTTP para respuestas 304 Not Modified (0 bytes de payload de red)
 const httpEtagCache = new Map<string, { etag: string; data: any }>();
 
+const sessionExpiredListeners = new Set<() => void>();
+let isHandlingSessionExpired = false;
+
+export const onSessionExpired = (listener: () => void): (() => void) => {
+  sessionExpiredListeners.add(listener);
+  return () => {
+    sessionExpiredListeners.delete(listener);
+  };
+};
+
+const triggerSessionExpired = (): void => {
+  if (isHandlingSessionExpired) return;
+  isHandlingSessionExpired = true;
+  safeStorage.removeItem('hoa_mobile_token');
+  safeStorage.removeItem('hoa_mobile_auth');
+  sessionExpiredListeners.forEach((fn) => {
+    try { fn(); } catch { }
+  });
+  setTimeout(() => {
+    isHandlingSessionExpired = false;
+  }, 2000);
+};
+
 const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> => {
   const url = `${API_BASE_URL}${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`;
   const isGet = !options?.method || options.method.toUpperCase() === 'GET';
@@ -263,9 +286,17 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
       try {
         errorJson = JSON.parse(errorText);
       } catch { }
-      throw new Error(
-        errorJson?.error || errorJson?.message || `HTTP ${res.status}: ${errorText || res.statusText}`
-      );
+      const errorMsg =
+        errorJson?.error || errorJson?.message || `HTTP ${res.status}: ${errorText || res.statusText}`;
+
+      if (
+        !endpoint.includes('/usuarios/login') &&
+        (res.status === 401 || /token.*inv[aá]lido|expirado|inicia sesi[oó]n nuevamente/i.test(errorMsg))
+      ) {
+        triggerSessionExpired();
+      }
+
+      throw new Error(errorMsg);
     }
 
     const data = await res.json();

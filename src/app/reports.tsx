@@ -1379,8 +1379,9 @@ const styles = StyleSheet.create({
   },
   modalStatusBannerText: {
     fontSize: 11.5,
-    fontWeight: '900',
-    letterSpacing: 0.5,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+    flexShrink: 1,
   },
   modalInfoGrid: {
     flexDirection: 'row',

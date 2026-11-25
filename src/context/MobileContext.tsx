@@ -19,7 +19,7 @@ import {
   subscribeToNetworkState,
   SyncResult,
 } from '../services/offlineSyncService';
-import { safeStorage, getLocalDateStr, getLocalDateTimeFromUtc } from '../services/apiService';
+import { safeStorage, getLocalDateStr, getLocalDateTimeFromUtc, onSessionExpired } from '../services/apiService';
 
 const computeTurno = (): string => {
   const hour = new Date().getHours();
@@ -464,6 +464,12 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setAgenteActual(DEFAULT_AGENTE);
     setReportes([]);
   }, []);
+
+  useEffect(() => {
+    return onSessionExpired(() => {
+      logout();
+    });
+  }, [logout]);
 
   const submitReportOrQueue = useCallback(async (
     params: {

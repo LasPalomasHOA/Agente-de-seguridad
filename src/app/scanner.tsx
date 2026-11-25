@@ -741,7 +741,12 @@ export default function ScannerScreen() {
                 <View style={styles.accessDeniedIconBadge}>
                   <Ionicons name={evaluacionSancion?.requiresAdmin ? 'ban' : 'time'} size={18} color="#ffffff" />
                 </View>
-                <ThemedText style={styles.accessDeniedTopBannerText}>
+                <ThemedText
+                  style={styles.accessDeniedTopBannerText}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.75}
+                >
                   {evaluacionSancion?.levelTitle || 'ACCESO RESTRINGIDO'}
                 </ThemedText>
               </View>
@@ -2889,7 +2894,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
+    gap: 8,
     borderRadius: 14,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -2904,13 +2910,15 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 8,
+    flexShrink: 0,
   },
   accessDeniedTopBannerText: {
     color: '#ffffff',
-    fontSize: 14.5,
-    fontWeight: '900',
-    letterSpacing: 0.6,
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+    flexShrink: 1,
+    textAlign: 'center',
   },
   suspensionDetailCard: {
     backgroundColor: '#ffffff',
@@ -3033,6 +3041,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     height: 48,
+    paddingHorizontal: 12,
     backgroundColor: '#0D6E5F',
     borderRadius: 12,
     shadowColor: '#0D6E5F',
@@ -3044,8 +3053,10 @@ const styles = StyleSheet.create({
   reportActionBtnText: {
     color: '#ffffff',
     fontSize: 13.5,
-    fontWeight: '900',
-    letterSpacing: 0.3,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+    flexShrink: 1,
+    textAlign: 'center',
   },
   historyCardInsideHighlight: {
     borderColor: '#0D6E5F',
@@ -3059,6 +3070,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '#0D6E5F',
     height: 48,
+    paddingHorizontal: 12,
     borderRadius: 12,
     shadowColor: '#0D6E5F',
     shadowOffset: { width: 0, height: 4 },
@@ -3069,8 +3081,10 @@ const styles = StyleSheet.create({
   exitActionBtnText: {
     color: '#ffffff',
     fontSize: 13,
-    fontWeight: '900',
-    letterSpacing: 0.3,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+    flexShrink: 1,
+    textAlign: 'center',
   },
   entryActionBtn: {
     flexDirection: 'row',
@@ -3078,6 +3092,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '#0D6E5F',
     height: 48,
+    paddingHorizontal: 12,
     borderRadius: 12,
     shadowColor: '#0D6E5F',
     shadowOffset: { width: 0, height: 4 },
@@ -3088,8 +3103,10 @@ const styles = StyleSheet.create({
   entryActionBtnText: {
     color: '#ffffff',
     fontSize: 13.5,
-    fontWeight: '900',
-    letterSpacing: 0.3,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+    flexShrink: 1,
+    textAlign: 'center',
   },
   reportInfractionSecBtn: {
     flexDirection: 'row',
@@ -3099,13 +3116,16 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: '#F59E0B',
     height: 46,
+    paddingHorizontal: 12,
     borderRadius: 12,
   },
   reportInfractionSecBtnText: {
     color: '#92400E',
     fontSize: 13,
-    fontWeight: '900',
-    letterSpacing: 0.3,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+    flexShrink: 1,
+    textAlign: 'center',
   },
   reportInfractionDisabledBtn: {
     backgroundColor: '#F1F5F9',
