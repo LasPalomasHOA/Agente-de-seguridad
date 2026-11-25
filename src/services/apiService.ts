@@ -206,8 +206,10 @@ export const onSessionExpired = (listener: () => void): (() => void) => {
   };
 };
 
-const triggerSessionExpired = (): void => {
-  if (isHandlingSessionExpired) return;
+const triggerSessionExpired = (expiredToken: string | null): void => {
+  if (!expiredToken || isHandlingSessionExpired) return;
+  const currentToken = safeStorage.getItem('hoa_mobile_token');
+  if (!currentToken || currentToken !== expiredToken) return;
   isHandlingSessionExpired = true;
   safeStorage.removeItem('hoa_mobile_token');
   safeStorage.removeItem('hoa_mobile_auth');
@@ -291,9 +293,11 @@ const fetchJson = async (endpoint: string, options?: RequestInit): Promise<any> 
 
       if (
         !endpoint.includes('/usuarios/login') &&
+        Boolean(sessionToken) &&
+        sessionToken === safeStorage.getItem('hoa_mobile_token') &&
         (res.status === 401 || /token.*inv[aá]lido|expirado|inicia sesi[oó]n nuevamente/i.test(errorMsg))
       ) {
-        triggerSessionExpired();
+        triggerSessionExpired(sessionToken);
       }
 
       throw new Error(errorMsg);
@@ -721,8 +725,10 @@ export const ApiService = {
 
         const userData = res?.usuario || res?.user || res;
         if (userData && (userData.id_usuario || userData.id)) {
+          isHandlingSessionExpired = false;
           if (res?.token) {
             safeStorage.setItem('hoa_mobile_token', res.token);
+            await AsyncStorage.setItem('hoa_mobile_token', res.token).catch(() => { });
           }
           const id = userData.id_usuario || userData.id;
           const roleName = userData.rolNombre || userData.rol?.nombre || userData.rol || 'Agente de Seguridad';

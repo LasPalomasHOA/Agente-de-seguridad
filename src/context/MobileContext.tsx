@@ -19,7 +19,7 @@ import {
   subscribeToNetworkState,
   SyncResult,
 } from '../services/offlineSyncService';
-import { safeStorage, getLocalDateStr, getLocalDateTimeFromUtc, onSessionExpired } from '../services/apiService';
+import { safeStorage, getLocalDateStr, getLocalDateTimeFromUtc, onSessionExpired, apiCache } from '../services/apiService';
 
 const computeTurno = (): string => {
   const hour = new Date().getHours();
@@ -459,6 +459,7 @@ export const MobileProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     safeStorage.removeItem('hoa_mobile_agente');
     safeStorage.removeItem('hoa_mobile_reportes');
     safeStorage.removeItem('hoa_mobile_token');
+    apiCache.invalidate();
     saveCachedReports([]);
     setIsAuthenticated(false);
     setAgenteActual(DEFAULT_AGENTE);
